@@ -1,0 +1,224 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" x:Class="OneCMonitor.MainWindow" Title="{Binding WindowTitle}" Icon="/Assets/app.ico" Width="1450" Height="900" MinWidth="1050" MinHeight="680" mc:Ignorable="d">
+  <Grid RowDefinitions="138,*,72">
+    <Border Grid.Row="0" Background="#111A29" BorderBrush="#273449" BorderThickness="0,0,0,1" Padding="20,10">
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="12">
+        <Border Background="#263B22" CornerRadius="8" Padding="11,7" VerticalAlignment="Center"><TextBlock Text="1C" Foreground="#FACC15" FontSize="20" FontWeight="Bold"/></Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+          <TextBlock Text="{Binding ServerHeaderTitle}" FontWeight="SemiBold" FontSize="24"/>
+          <TextBlock Text="{Binding ServerHeaderDetails}" Foreground="#B8C7DB" FontSize="13" LineHeight="19" TextWrapping="Wrap" MaxLines="5"/>
+        </StackPanel>
+        <TextBlock Grid.Column="2" Text="{Binding Status}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{Binding StatusColor}" MaxWidth="380" TextWrapping="Wrap" ToolTip.Tip="{Binding Status}"/>
+        <Button Grid.Column="3" Content="Обновить" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
+        <Button Grid.Column="4" Content="Отчёт HTML" Command="{Binding ExportCommand}" VerticalAlignment="Center"/>
+        <ToggleSwitch Grid.Column="5" IsChecked="{Binding IsRunning}" OnContent="Мониторинг" OffContent="Пауза" VerticalAlignment="Center"/>
+      </Grid>
+    </Border>
+
+    <TabControl Grid.Row="1" Margin="16">
+      <TabItem Header="Обзор">
+        <ScrollViewer><StackPanel Spacing="14" Margin="0,12,0,0">
+          <Grid ColumnDefinitions="*,*,*,*,*" ColumnSpacing="12">
+            <Border Classes="card"><StackPanel><TextBlock Text="RPHOST" Classes="muted"/><TextBlock Text="{Binding ProcessCount}" Classes="h1"/><TextBlock Text="процессов" Classes="muted"/></StackPanel></Border>
+            <Border Grid.Column="1" Classes="card"><StackPanel><TextBlock Text="ПАМЯТЬ" Classes="muted"/><TextBlock Text="{Binding TotalMemoryText}" Classes="h1"/><TextBlock Text="рабочий набор" Classes="muted"/></StackPanel></Border>
+            <Border Grid.Column="2" Classes="card"><StackPanel><TextBlock Text="CPU" Classes="muted"/><TextBlock Text="{Binding TotalCpuText}" Classes="h1"/><TextBlock Text="суммарно" Classes="muted"/></StackPanel></Border>
+            <Border Grid.Column="3" Classes="card"><StackPanel><TextBlock Text="СЕАНСЫ" Classes="muted"/><TextBlock Text="{Binding SessionCount}" Classes="h1"/><TextBlock Text="{Binding SessionBreakdownText}" Classes="muted"/></StackPanel></Border>
+            <Border Grid.Column="4" Classes="card"><StackPanel><TextBlock Text="ТРЕВОГИ" Classes="muted"/><TextBlock Text="{Binding AlertCount}" Classes="h1" Foreground="#FB7185"/><TextBlock Text="требуют внимания" Classes="muted"/></StackPanel></Border>
+          </Grid>
+          <Border Classes="card">
+            <Grid ColumnDefinitions="180,180,*,160" ColumnSpacing="18">
+              <StackPanel><TextBlock Text="НАГРУЗКА НА ДИСК" Classes="muted"/><TextBlock Text="{Binding DiskUsageText}" Classes="h1"/></StackPanel>
+              <StackPanel Grid.Column="1"><TextBlock Text="ОЧЕРЕДЬ" Classes="muted"/><TextBlock Text="{Binding DiskQueueText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+              <StackPanel Grid.Column="2"><TextBlock Text="СКОРОСТЬ ВВОДА-ВЫВОДА" Classes="muted"/><TextBlock Text="{Binding DiskIoText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+              <TextBlock Grid.Column="3" Text="PhysicalDisk (_Total)" Classes="muted" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+            </Grid>
+          </Border>
+          <Border Classes="card">
+            <StackPanel Spacing="8">
+              <TextBlock Text="ОБОРУДОВАНИЕ, НАКОПИТЕЛИ И СЕТЬ" Classes="muted"/>
+              <TextBlock Text="{Binding ServerHardwareText}" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"/>
+              <TextBlock Text="{Binding NetworkLoadText}" FontSize="16" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+          <Border Classes="card">
+            <Grid RowDefinitions="Auto,*"><StackPanel><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="Процессы rphost" FontSize="16" FontWeight="SemiBold"/><TextBlock Text="Красная оценка означает вероятный источник зависания" Classes="muted" VerticalAlignment="Center"/></StackPanel><TextBlock Text="{Binding AutoDrainStatus}" Foreground="#60A5FA" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel>
+              <DataGrid Grid.Row="1" ItemsSource="{Binding Processes}" SelectedItem="{Binding SelectedProcess}" AutoGenerateColumns="False" IsReadOnly="True" Height="350" Margin="0,12,0,0" CanUserSortColumns="True" CanUserResizeColumns="True">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Риск" Binding="{Binding RiskText}" Width="80"/>
+                  <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="80"/>
+                  <DataGridTextColumn Header="Состояние процесса" Binding="{Binding DrainStatus}" Width="190"/>
+                  <DataGridTextColumn Header="CPU" Binding="{Binding CpuText}" Width="90"/>
+                  <DataGridTextColumn Header="RAM" Binding="{Binding MemoryText}" Width="110"/>
+                  <DataGridTextColumn Header="Сеансы" Binding="{Binding SessionCount}" Width="90"/>
+                  <DataGridTextColumn Header="Ср. вызов" Binding="{Binding AvgCallText}" Width="110"/>
+                  <DataGridTextColumn Header="Ср. БД" Binding="{Binding AvgDbText}" Width="100"/>
+                  <DataGridTextColumn Header="Пользователи" Binding="{Binding Users}" Width="2*"/>
+                  <DataGridTextColumn Header="Диагноз" Binding="{Binding Diagnosis}" Width="3*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Grid>
+          </Border>
+          <Border Classes="card"><StackPanel><TextBlock Text="Последние тревоги" FontSize="16" FontWeight="SemiBold"/><ItemsControl ItemsSource="{Binding Alerts}"><ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="#273449" BorderThickness="0,0,0,1" Padding="4,10"><Grid ColumnDefinitions="150,90,120,*"><TextBlock Text="{Binding TimeText}" Classes="muted"/><TextBlock Grid.Column="1" Text="{Binding Severity}" Foreground="#FB7185"/><TextBlock Grid.Column="2" Text="{Binding Source}"/><TextBlock Grid.Column="3" Text="{Binding Message}"/></Grid></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel></Border>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="Пользователи и сеансы">
+        <Grid RowDefinitions="Auto,*" Margin="0,12,0,0">
+          <StackPanel Spacing="10">
+            <Border Classes="card"><TextBlock Text="CPU/RAM учитываются Windows для процесса rphost. «CPU пользователя» — оценочная доля среди сеансов процесса. Точный документ и строка кода доступны только через технологический журнал 1С." Classes="muted" TextWrapping="Wrap"/></Border>
+            <Grid ColumnDefinitions="*,*,*" ColumnSpacing="10">
+              <Border Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="●" Foreground="#34D399" FontSize="22"/><StackPanel><TextBlock Text="АКТИВНЫЕ" Classes="muted"/><TextBlock Text="{Binding ActiveSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
+              <Border Grid.Column="1" Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="💤" FontSize="20"/><StackPanel><TextBlock Text="СПЯЩИЕ" Classes="muted"/><TextBlock Text="{Binding SleepingSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
+              <Border Grid.Column="2" Classes="card"><StackPanel><TextBlock Text="ВСЕГО СЕАНСОВ" Classes="muted"/><TextBlock Text="{Binding SessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></Border>
+            </Grid>
+          </StackPanel>
+          <DataGrid Grid.Row="1" ItemsSource="{Binding Sessions}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,12,0,0" CanUserResizeColumns="True" CanUserSortColumns="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Состояние" Binding="{Binding SessionState}" Width="165"/>
+              <DataGridTextColumn Header="Пользователь" Binding="{Binding UserName}" Width="220"/>
+              <DataGridTextColumn Header="База" Binding="{Binding InfoBase}" Width="170"/>
+              <DataGridTextColumn Header="Приложение" Binding="{Binding AppId}" Width="140"/>
+              <DataGridTextColumn Header="Компьютер" Binding="{Binding Host}" Width="180"/>
+              <DataGridTextColumn Header="PID rphost" Binding="{Binding Pid}" Width="100"/>
+              <DataGridTextColumn Header="Память вызова RAC" Binding="{Binding SessionMemoryText}" Width="145"/>
+              <DataGridTextColumn Header="CPU-время RAC" Binding="{Binding SessionCpuTimeText}" Width="130"/>
+              <DataGridTextColumn Header="Текущий вызов" Binding="{Binding CurrentCallText}" Width="120"/>
+              <DataGridTextColumn Header="Вызов СУБД" Binding="{Binding CurrentDbText}" Width="120"/>
+              <DataGridTextColumn Header="I/O сеанса" Binding="{Binding IoCurrentText}" Width="180"/>
+              <DataGridTextColumn Header="Нагрузка за 5 минут" Binding="{Binding Load5MinText}" Width="390"/>
+              <DataGridTextColumn Header="I/O за 5 минут" Binding="{Binding Io5MinText}" Width="310"/>
+              <DataGridTextColumn Header="CPU rphost" Binding="{Binding ProcessCpuText}" Width="100"/>
+              <DataGridTextColumn Header="RAM rphost" Binding="{Binding ProcessMemoryText}" Width="110"/>
+              <DataGridTextColumn Header="CPU пользователя*" Binding="{Binding EstimatedCpuText}" Width="130"/>
+              <DataGridTextColumn Header="Начало" Binding="{Binding StartedAt}" Width="205"/>
+              <DataGridTextColumn Header="Активность" Binding="{Binding LastActiveAt}" Width="205"/>
+              <DataGridTextColumn Header="Метод/операция RAC" Binding="{Binding Operation}" Width="260"/>
+              <DataGridTextColumn Header="Документ/контекст ТЖ" Binding="{Binding TechContext}" Width="360"/>
+              <DataGridTextColumn Header="Последний вызов ТЖ" Binding="{Binding LastCallText}" Width="155"/>
+              <DataGridTextColumn Header="Запрос СУБД" Binding="{Binding DbRequest}" Width="300"/>
+              <DataGridTextColumn Header="Блокировка" Binding="{Binding Blocked}" Width="190"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Grid>
+      </TabItem>
+
+      <TabItem Header="Администрирование">
+        <ScrollViewer><StackPanel Width="900" HorizontalAlignment="Left" Spacing="14" Margin="0,18,0,0">
+          <Border Classes="card" BorderBrush="#B91C1C"><StackPanel Spacing="10">
+            <TextBlock Text="ОПАСНЫЕ АДМИНИСТРАТИВНЫЕ ДЕЙСТВИЯ" FontSize="19" FontWeight="Bold" Foreground="#FB7185"/>
+            <TextBlock Text="Завершение сеансов прерывает работу пользователей. Перезапуск служб останавливает весь кластер на этом сервере. Принудительное завершение rphost может оборвать транзакции и вызвать откат данных. Используйте только в согласованное окно и запускайте программу от имени администратора." TextWrapping="Wrap" Foreground="#FCA5A5"/>
+            <TextBlock Text="Для операций с сеансами и службами введите: ПОДТВЕРЖДАЮ. Для принудительного завершения rphost: УБИТЬ RPHOST" TextWrapping="Wrap" FontWeight="SemiBold"/>
+            <TextBox Text="{Binding AdminConfirmationText}" Watermark="Контрольная фраза" FontSize="16"/>
+            <TextBlock Text="{Binding AdminActionStatus}" TextWrapping="Wrap" Foreground="#FACC15"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Управление сеансами через RAC" FontSize="17" FontWeight="SemiBold"/>
+            <WrapPanel Orientation="Horizontal">
+              <Button Content="Завершить все сеансы" Command="{Binding TerminateAllSessionsCommand}" Margin="0,0,10,10" Background="#7F1D1D"/>
+              <Button Content="Выгрузить всех, кроме Конфигуратора" Command="{Binding TerminateExceptConfiguratorCommand}" Margin="0,0,10,10" Background="#7F1D1D"/>
+              <Button Content="Удалить ранние дубликаты" Command="{Binding TerminateDuplicateSessionsCommand}" Margin="0,0,10,10"/>
+              <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10"/>
+            </WrapPanel>
+            <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Фоновые и регламентные задания" FontSize="17" FontWeight="SemiBold"/>
+            <WrapPanel Orientation="Horizontal">
+              <Button Content="Выключить фоновые задания" Command="{Binding DisableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#92400E"/>
+              <Button Content="Включить фоновые задания" Command="{Binding EnableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#065F46"/>
+            </WrapPanel>
+            <TextBlock Text="Выключение устанавливает scheduled-jobs-deny=on во всех найденных базах и завершает уже работающие фоновые сеансы. Включение снимает запрет только с баз, которые были выключены этим монитором; изначально запрещённые базы не затрагиваются. Требуется фраза ПОДТВЕРЖДАЮ." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Службы и процессы Windows" FontSize="17" FontWeight="SemiBold"/>
+            <WrapPanel Orientation="Horizontal">
+              <Button Content="Плавно вывести выбранный rphost" Command="{Binding GracefulTurnOffCommand}" Margin="0,0,10,10" Background="#065F46"/>
+              <Button Content="Перезапустить ВСЕ службы сервера 1С" Command="{Binding RestartOneCServicesCommand}" Margin="0,0,10,10" Background="#92400E"/>
+              <Button Content="Принудительно завершить ВСЕ rphost" Command="{Binding KillAllRphostCommand}" Margin="0,0,10,10" Background="#991B1B"/>
+            </WrapPanel>
+            <TextBlock Text="Для плавного вывода сначала выберите строку процесса на вкладке «Обзор». Команда process turn-off прекращает назначение новой нагрузки, но не убивает текущие вызовы. Службы определяются по ragent.exe в PathName. Красная кнопка rphost выполняет taskkill /F /IM rphost.exe." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="Настройки">
+        <ScrollViewer><StackPanel Width="760" HorizontalAlignment="Left" Spacing="14" Margin="0,18,0,0">
+          <Border Classes="card"><StackPanel Spacing="10"><TextBlock Text="Подключение к администрированию 1С" FontSize="17" FontWeight="SemiBold"/><TextBlock Text="Программа найдёт rac.exe автоматически. Если RAS не запущен, нажмите «Запустить RAS». Это не перезапускает кластер 1С." Classes="muted" TextWrapping="Wrap"/>
+            <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+              <TextBlock Text="Путь к rac.exe" VerticalAlignment="Center"/><TextBox Grid.Column="1" Text="{Binding Settings.RacPath}" Watermark="Автопоиск"/>
+              <TextBlock Grid.Row="1" Text="Адрес RAS" VerticalAlignment="Center"/><TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Settings.Endpoint}" Watermark="localhost:1545"/>
+              <TextBlock Grid.Row="2" Text="Адрес агента 1С" VerticalAlignment="Center"/><TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Settings.AgentEndpoint}" Watermark="localhost:1540"/>
+              <TextBlock Grid.Row="3" Text="Администратор кластера" VerticalAlignment="Center"/><TextBox Grid.Row="3" Grid.Column="1" Text="{Binding Settings.ClusterUser}" Watermark="Имя из свойств кластера (не пользователь базы)"/>
+              <TextBlock Grid.Row="4" Text="Пароль (может быть пуст)" VerticalAlignment="Center"/><TextBox Grid.Row="4" Grid.Column="1" Text="{Binding Settings.ClusterPassword}" PasswordChar="●" Watermark="Оставьте пустым, если пароль не задан"/>
+              <TextBlock Grid.Row="5" Text="Каталог техжурнала" VerticalAlignment="Center"/><TextBox Grid.Row="5" Grid.Column="1" Text="{Binding Settings.TechLogPath}" Watermark="Например D:\1C-TechLog"/>
+              <TextBlock Grid.Row="6" Text="Тайм-аут RAC, сек." VerticalAlignment="Center"/><NumericUpDown Grid.Row="6" Grid.Column="1" Value="{Binding Settings.RacTimeoutSeconds}" Minimum="15" Maximum="300" Increment="15"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сохранить и проверить" Command="{Binding SaveSettingsCommand}"/><Button Content="Запустить RAS" Command="{Binding StartRasCommand}"/><TextBlock Text="{Binding RacStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="400" TextWrapping="Wrap" ToolTip.Tip="{Binding Settings.RacPath}"/></StackPanel>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Автоматический суточный отчёт" FontSize="17" FontWeight="SemiBold"/>
+            <ToggleSwitch IsChecked="{Binding Settings.AutoDailyReport}" OnContent="Включён, ежедневно в 23:55" OffContent="Выключен"/>
+            <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="10">
+              <TextBlock Text="Каталог отчётов" VerticalAlignment="Center"/><TextBox Grid.Column="1" Text="{Binding Settings.ReportFolder}"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сформировать отчёт за сегодня" Command="{Binding GenerateDailyReportCommand}"/><TextBlock Text="{Binding AdminActionStatus}" Classes="muted" VerticalAlignment="Center" TextWrapping="Wrap"/></StackPanel>
+            <TextBlock Text="Отчёт содержит почасовой рост CPU, RAM, диска, сети, количества сеансов и таблицу пользователей, генерировавших нагрузку. Для полного дня программа должна оставаться запущенной." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Плавный автоматический вывод rphost" FontSize="17" FontWeight="SemiBold"/>
+            <ToggleSwitch IsChecked="{Binding Settings.AutoDrainEnabled}" OnContent="Автовывод включён" OffContent="Автовывод выключен — только наблюдение"/>
+            <TextBlock Text="При длительном превышении памяти выполняется только RAC process turn-off: новая нагрузка направляется в другие процессы, текущие вызовы не убиваются. Принудительный taskkill автоматически не применяется." Classes="muted" TextWrapping="Wrap"/>
+            <Grid ColumnDefinitions="270,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="8">
+              <TextBlock Text="Порог памяти rphost, МБ"/><NumericUpDown Grid.Column="1" Value="{Binding Settings.AutoDrainMemoryMb}" Minimum="512" Maximum="131072" Increment="256"/>
+              <TextBlock Grid.Row="1" Text="Время превышения, минут"/><NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Settings.AutoDrainMinutes}" Minimum="1" Maximum="1440"/>
+              <TextBlock Grid.Row="2" Text="Минимум остающихся rphost"/><NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding Settings.AutoDrainMinProcesses}" Minimum="1" Maximum="64"/>
+              <TextBlock Grid.Row="3" Text="Пауза между выводами, минут"/><NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding Settings.AutoDrainCooldownMinutes}" Minimum="5" Maximum="1440"/>
+            </Grid>
+            <TextBlock Text="{Binding AutoDrainStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Производительность монитора" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Локальные CPU/RAM остаются оперативными, а тяжёлые RAC, техжурнал и запись истории выполняются реже. Рекомендуемые значения уже установлены по умолчанию." Classes="muted" TextWrapping="Wrap"/>
+            <Grid ColumnDefinitions="270,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="8">
+              <TextBlock Text="Локальные метрики, сек."/><NumericUpDown Grid.Column="1" Value="{Binding Settings.IntervalSeconds}" Minimum="2" Maximum="60"/>
+              <TextBlock Grid.Row="1" Text="Опрос RAC, сек."/><NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Settings.RacPollSeconds}" Minimum="5" Maximum="300" Increment="5"/>
+              <TextBlock Grid.Row="2" Text="Сканирование техжурнала, сек."/><NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding Settings.TechLogPollSeconds}" Minimum="15" Maximum="600" Increment="15"/>
+              <TextBlock Grid.Row="3" Text="Запись истории на диск, сек."/><NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding Settings.HistoryWriteSeconds}" Minimum="30" Maximum="600" Increment="30"/>
+              <TextBlock Grid.Row="4" Text="Повтор одинаковой тревоги, сек."/><NumericUpDown Grid.Row="4" Grid.Column="1" Value="{Binding Settings.AlertRepeatSeconds}" Minimum="60" Maximum="3600" Increment="60"/>
+            </Grid>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10"><TextBlock Text="Пороги тревог" FontSize="17" FontWeight="SemiBold"/>
+            <Grid ColumnDefinitions="240,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="8"><TextBlock Text="CPU процесса, %"/><NumericUpDown Grid.Column="1" Value="{Binding Settings.CpuAlert}" Minimum="10" Maximum="100"/>
+              <TextBlock Grid.Row="1" Text="RAM процесса, МБ"/><NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Settings.MemoryAlertMb}" Minimum="256" Maximum="131072" Increment="256"/>
+              <TextBlock Grid.Row="2" Text="Средний вызов, мс"/><NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding Settings.CallAlertMs}" Minimum="100" Maximum="600000" Increment="500"/>
+              <TextBlock Grid.Row="3" Text="Загрузка диска, %"/><NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding Settings.DiskAlert}" Minimum="10" Maximum="100"/></Grid>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="8">
+            <TextBlock Text="О программе" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Разработчик: Zakharevich Igor" FontWeight="SemiBold" FontSize="20" Foreground="#60A5FA"/>
+            <Grid ColumnDefinitions="170,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
+              <TextBlock Text="Организация" Classes="muted"/><TextBlock Grid.Column="1" Text="ООО «Компьютерная безопасность»"/>
+              <TextBlock Grid.Row="1" Text="Сайт и email" Classes="muted"/><StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8"><Button Content="https://csl.by" Command="{Binding OpenWebsiteCommand}" Padding="8,3"/><Button Content="info@csl.by" Command="{Binding OpenEmailCommand}" Padding="8,3"/></StackPanel>
+              <TextBlock Grid.Row="2" Text="Телефон" Classes="muted"/><Button Grid.Row="2" Grid.Column="1" Content="+375 29 337 14 12" Command="{Binding OpenPhoneCommand}" HorizontalAlignment="Left" Padding="8,3"/>
+              <TextBlock Grid.Row="3" Text="Адрес и время" Classes="muted"/><TextBlock Grid.Row="3" Grid.Column="1" Text="Минск, ул. Фабрициуса, 9 • Пн–Пт 9:00–17:00" TextWrapping="Wrap"/>
+            </Grid>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="8"><TextBlock Text="Как начать" FontSize="17" FontWeight="SemiBold"/><TextBlock Text="1. Запустите программу от имени администратора на сервере 1С.&#10;2. Нажмите «Запустить RAS», затем «Сохранить и проверить».&#10;3. Если кластер защищён, укажите учётную запись администратора кластера.&#10;4. Оставьте мониторинг включённым до момента зависания и сформируйте HTML-отчёт." TextWrapping="Wrap" Classes="muted"/></StackPanel></Border>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+      <TabItem Header="Журнал"><TextBox Margin="0,12,0,0" Text="{Binding LogText}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Consolas" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto"/></TabItem>
+    </TabControl>
+    <Border Grid.Row="2" Background="#111A29" BorderBrush="#273449" BorderThickness="0,1,0,0">
+      <Grid ColumnDefinitions="*,Auto" Margin="16,4">
+        <TextBlock Text="{Binding Footer}" VerticalAlignment="Center" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"/>
+        <StackPanel Grid.Column="1" HorizontalAlignment="Right" Spacing="3">
+          <TextBlock Text="Разработчик: Zakharevich Igor" HorizontalAlignment="Right" FontSize="15" FontWeight="SemiBold"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
+            <Button Content="csl.by" Command="{Binding OpenWebsiteCommand}" FontSize="11" Padding="9,4"/>
+            <Button Content="info@csl.by" Command="{Binding OpenEmailCommand}" FontSize="11" Padding="9,4"/>
+            <Button Content="+375 29 337 14 12" Command="{Binding OpenPhoneCommand}" FontSize="11" Padding="9,4"/>
+          </StackPanel>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
