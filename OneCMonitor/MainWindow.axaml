@@ -155,6 +155,18 @@
             <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сохранить и проверить" Command="{Binding SaveSettingsCommand}"/><Button Content="Запустить RAS" Command="{Binding StartRasCommand}"/><TextBlock Text="{Binding RacStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="400" TextWrapping="Wrap" ToolTip.Tip="{Binding Settings.RacPath}"/></StackPanel>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Подключение к серверу SQL — диск базы данных" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Укажите сервер СУБД, чтобы очередь и нагрузка диска опрашивались только по диску, на котором развернута база данных (определяется по sys.master_files). Без подключения используется суммарный счётчик всех физических дисков (_Total)." Classes="muted" TextWrapping="Wrap"/>
+            <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+              <TextBlock Text="Сервер SQL" VerticalAlignment="Center"/><TextBox Grid.Column="1" Text="{Binding Settings.SqlServer}" Watermark="Например localhost или SERVER\INSTANCE"/>
+              <TextBlock Grid.Row="1" Text="База данных" VerticalAlignment="Center"/><TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Settings.SqlDatabase}" Watermark="Пусто — все пользовательские базы"/>
+              <TextBlock Grid.Row="2" Text="Пользователь SQL" VerticalAlignment="Center"/><TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Settings.SqlUser}" Watermark="Пусто — Windows-аутентификация"/>
+              <TextBlock Grid.Row="3" Text="Пароль SQL" VerticalAlignment="Center"/><TextBox Grid.Row="3" Grid.Column="1" Text="{Binding Settings.SqlPassword}" PasswordChar="●" Watermark="Не сохраняется на диск, вводится после перезапуска"/>
+            </Grid>
+            <TextBlock Text="{Binding SqlDiskStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            <TextBlock Text="После изменения нажмите «Сохранить и проверить» выше. Диск базы перепроверяется автоматически каждые 5 минут." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автоматический суточный отчёт" FontSize="17" FontWeight="SemiBold"/>
             <ToggleSwitch IsChecked="{Binding Settings.AutoDailyReport}" OnContent="Включён, ежедневно в 23:55" OffContent="Выключен"/>
             <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="10">

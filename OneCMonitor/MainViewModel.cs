@@ -50,7 +50,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly List<string> _cachedTechLogFiles = new();
     private RacSnapshot? _cachedRac;
     private DateTime _lastAutomaticDrain = DateTime.MinValue;
-    private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _racCandidatesCachedAt = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue;
+    private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _racCandidatesCachedAt = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue, _lastSqlDrivesRefresh = DateTime.MinValue;
     private string _cachedVolumeSummary = "не определены", _cachedStaticSystem = "";
     private readonly StringBuilder _log = new();
     private readonly DiskPerformanceMonitor _disk = new();
@@ -64,6 +64,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private string _serverHardwareText = "Определение оборудования…", _networkLoadText = "Сеть: ожидание первого измерения…";
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
+    private string _sqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
     private ProcessRow? _selectedProcess;
     private string? _lastRacPath, _lastClusterId;
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
@@ -77,7 +78,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         Settings.BackgroundJobsDisabledInfobases ??= new();
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
         ExportCommand = new RelayCommand(ExportHtmlReport);
-        SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; await RefreshAsync(true); });
+        SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; _lastSqlDrivesRefresh = DateTime.MinValue; await RefreshAsync(true); });
         StartRasCommand = new RelayCommand(async () => await StartRasAsync());
         OpenWebsiteCommand = new RelayCommand(() => OpenUri("https://csl.by"));
         OpenEmailCommand = new RelayCommand(() => OpenUri("mailto:info@csl.by"));
@@ -111,6 +112,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string AdminConfirmationText { get => _adminConfirmationText; set => Set(ref _adminConfirmationText, value); }
     public string AdminActionStatus { get => _adminActionStatus; private set => Set(ref _adminActionStatus, value); }
     public string AutoDrainStatus { get => _autoDrainStatus; private set => Set(ref _autoDrainStatus, value); }
+    public string SqlDiskStatus { get => _sqlDiskStatus; private set => Set(ref _sqlDiskStatus, value); }
     public ProcessRow? SelectedProcess { get => _selectedProcess; set => Set(ref _selectedProcess, value); }
     public int ProcessCount { get => _processCount; private set => Set(ref _processCount, value); }
     public int SessionCount { get => _sessionCount; private set => Set(ref _sessionCount, value); }
@@ -145,7 +147,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var version = FileVersionInfo.GetVersionInfo(racPath).FileVersion ?? "?";
             oneC = $"1С/RAC {version} ({ArchitectureLabel(racPath)})";
         }
-        var diskText = disk.Available ? $"диск {disk.UsagePercent:0}% · R {FormatRate(disk.ReadBytesPerSec)} · W {FormatRate(disk.WriteBytesPerSec)} · ср. очередь {DiskQueueLabel(disk)}" : "диск: ожидание данных";
+        var diskText = disk.Available ? $"диск {disk.UsagePercent:0}% ({DiskScopeLabel(disk)}) · R {FormatRate(disk.ReadBytesPerSec)} · W {FormatRate(disk.WriteBytesPerSec)} · ср. очередь {DiskQueueLabel(disk)}" : "диск: ожидание данных";
         NetworkLoadText = network.Available ? $"Сеть: ↓ {FormatRate(network.ReceiveBytesPerSec)} · ↑ {FormatRate(network.SendBytesPerSec)} · загрузка {network.UtilizationPercent:0.0}% · адаптеров {network.InterfaceCount}" : "Сеть: ожидание второго измерения";
         if (DateTime.UtcNow - _lastVolumeRefresh >= TimeSpan.FromMinutes(1)) { _cachedVolumeSummary = GetVolumeSummary(); _lastVolumeRefresh = DateTime.UtcNow; }
         ServerHardwareText = $"{_virtualizationInfo} · {_physicalDiskInfo} · Тома: {_cachedVolumeSummary}";
@@ -163,6 +165,58 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             _physicalDiskInfo = disks.Length == 0 ? "Накопители: тип не определён" : "Накопители: " + string.Join("; ", disks);
         }
         catch (Exception ex) { _physicalDiskInfo = "Накопители: тип не определён"; Log("Определение SSD/HDD/NVMe: " + ex.Message); }
+    }
+
+    private async Task RefreshSqlDataDrivesAsync()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var server = (Settings.SqlServer ?? "").Trim();
+        if (server.Length == 0)
+        {
+            _disk.SetTargetDrives(Array.Empty<string>());
+            SqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
+            return;
+        }
+        try
+        {
+            // Через sys.master_files узнаём, на каких томах лежат файлы базы данных (mdf/ndf/ldf),
+            // чтобы счётчики PhysicalDisk опрашивали только диск СУБД, а не все диски сервера.
+            // Используется System.Data.SqlClient из Windows PowerShell — дополнительные драйверы не нужны.
+            var connection = $"Server={server};Encrypt=False;TrustServerCertificate=True;Connect Timeout=5;Application Name=1C Server Monitor;"
+                + (string.IsNullOrWhiteSpace(Settings.SqlUser)
+                    ? "Integrated Security=True;"
+                    : $"User ID={Settings.SqlUser};Password={Settings.SqlPassword};");
+            var database = (Settings.SqlDatabase ?? "").Trim().Replace("'", "''");
+            var query = database.Length > 0
+                ? $"SELECT DISTINCT UPPER(LEFT(physical_name,1)) FROM sys.master_files WHERE database_id = DB_ID(N'{database}')"
+                : "SELECT DISTINCT UPPER(LEFT(physical_name,1)) FROM sys.master_files WHERE database_id > 4";
+            var script = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();" +
+                $"$cn=New-Object System.Data.SqlClient.SqlConnection('{connection.Replace("'", "''")}');$cn.Open();" +
+                $"$cmd=$cn.CreateCommand();$cmd.CommandText='{query.Replace("'", "''")}';" +
+                "$r=$cmd.ExecuteReader();while($r.Read()){$r.GetString(0)};$cn.Close()";
+            var output = await RunAsync("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", script }, 30);
+            var drives = output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(x => x.Length == 1 && char.IsLetter(x[0])).Select(x => x.ToUpperInvariant() + ":")
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+            if (drives.Length == 0)
+            {
+                _disk.SetTargetDrives(Array.Empty<string>());
+                SqlDiskStatus = database.Length > 0
+                    ? $"SQL {server}: файлы базы «{Settings.SqlDatabase}» не найдены (проверьте имя базы) — используется _Total"
+                    : $"SQL {server}: пользовательские базы не найдены — используется _Total";
+                Log(SqlDiskStatus);
+                return;
+            }
+            _disk.SetTargetDrives(drives);
+            SqlDiskStatus = $"SQL {server}: база развернута на диске {string.Join(", ", drives)} — очередь и нагрузка опрашиваются только по нему";
+            LogOnce("sql-drives:" + string.Join(",", drives), SqlDiskStatus, TimeSpan.FromHours(1));
+        }
+        catch (Exception ex)
+        {
+            // Прежние настройки диска сохраняются: при временной ошибке SQL продолжаем опрашивать найденный ранее диск.
+            SqlDiskStatus = $"Ошибка подключения к SQL {server}: {ex.Message}";
+            LogOnce("sql:" + ex.Message, SqlDiskStatus, TimeSpan.FromMinutes(10));
+        }
     }
 
     private static string GetVolumeSummary()
@@ -242,6 +296,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         try
         {
             var local = SampleLocalProcesses();
+            if (DateTime.Now - _lastSqlDrivesRefresh >= TimeSpan.FromMinutes(5))
+            {
+                _lastSqlDrivesRefresh = DateTime.Now; // при ошибке SQL не повторяем тяжёлый запрос на каждом такте
+                await RefreshSqlDataDrivesAsync();
+            }
             var disk = _disk.Sample();
             var network = _network.Sample();
             var now = DateTime.Now;
@@ -343,7 +402,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
                 DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
                 DiskIoText = disk.Available ? $"чтение {FormatRate(disk.ReadBytesPerSec)} • запись {FormatRate(disk.WriteBytesPerSec)}" : "счётчики недоступны";
-                DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)}" : "Windows PDH";
+                DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)} · {DiskScopeLabel(disk)}" : "Windows PDH";
                 Status = deviations.Count > 0 ? $"Отклонения: {deviations.Count} · {string.Join("; ", deviations.Take(3))}{(deviations.Count > 3 ? "; … подробнее на вкладке «Обзор»" : "")}" : "Нагрузка в норме";
                 StatusColor = deviations.Count > 0 ? Brushes.LightCoral : Brushes.LightGreen;
                 Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
@@ -463,7 +522,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             ServerParam("Имя сервера", Environment.MachineName); ServerParam("Операционная система", RuntimeInformation.OSDescription.Trim()); ServerParam("Архитектура ОС", RuntimeInformation.OSArchitecture.ToString());
             ServerParam("Процессор", GetCpuDescription()); ServerParam("Логические процессоры", Environment.ProcessorCount.ToString()); ServerParam("Оперативная память", GetPhysicalMemory());
             ServerParam("Тип сервера и виртуализация", _virtualizationInfo); ServerParam("Физические накопители", _physicalDiskInfo); ServerParam("Тома, занято и свободно", GetVolumeSummary());
-            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
+            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Контроль диска СУБД", SqlDiskStatus); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
             ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
             sb.Append("</tbody></table><p class=\"sub\">Отчёт описывает фактически наблюдавшийся период. Средние и максимальные значения рассчитаны по измерениям программы, а нагрузка пользователей сопоставлена с сеансами и процессами 1С через RAC.</p></section>");
             sb.Append("<section><h2>Рост нагрузки по часам</h2><table><thead><tr><th>Час</th><th>CPU сред.</th><th>CPU макс.</th><th>RAM сред.</th><th>RAM макс.</th><th>Диск сред.</th><th>Диск макс.</th><th>Чтение макс.</th><th>Запись макс.</th><th>Очередь</th><th>Сеть ↓</th><th>Сеть ↑</th><th>Сеансы</th></tr></thead><tbody>");
@@ -718,7 +777,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         var candidates = new List<(string Key, AlertRow Row)>();
         if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert)
-            candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал, чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
+            candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал ({DiskScopeLabel(disk)}), чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
         foreach (var p in proc.Where(x => x.Risk >= 50)) candidates.Add(($"pid:{p.Pid}", new(now, p.Risk >= 80 ? "КРИТИЧНО" : "ВНИМАНИЕ", $"PID {p.Pid}", p.Diagnosis + (string.IsNullOrEmpty(p.Users) ? "" : $"; пользователи: {p.Users}"))));
         foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {s.Blocked}")));
 
@@ -1231,6 +1290,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             return "0,00 (возможно, драйвер SAN/RAID не сообщает)";
         return disk.QueueLength.ToString("0.00", CultureInfo.CurrentCulture);
     }
+    private static string DiskScopeLabel(DiskSnapshot disk) => string.IsNullOrWhiteSpace(disk.DisksLabel) ? "все диски" : $"диск БД {disk.DisksLabel}";
     private static string F(double value) => value.ToString("0.00", CultureInfo.InvariantCulture);
     private static string Csv(string s) => "\"" + (s ?? "").Replace("\"", "\"\"") + "\"";
     private static void Replace<T>(ObservableCollection<T> target, IEnumerable<T> src) { target.Clear(); foreach (var x in src) target.Add(x); }
@@ -1253,6 +1313,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 public sealed class MonitorSettings : NotifyBase
 {
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
+    private string _sqlServer = "", _sqlDatabase = "", _sqlUser = "", _sqlPassword = "";
     private bool _autoDailyReport = true, _autoDrainEnabled = false;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30;
@@ -1262,6 +1323,12 @@ public sealed class MonitorSettings : NotifyBase
     public string ClusterUser { get => _clusterUser; set => Set(ref _clusterUser, value); }
     public string ClusterPassword { get => _clusterPassword; set => Set(ref _clusterPassword, value); }
     public string TechLogPath { get => _techLogPath; set => Set(ref _techLogPath, value); }
+    // Подключение к серверу SQL: нужно, чтобы определить диск, на котором развернута база данных,
+    // и опрашивать очередь/нагрузку только этого диска, а не всех дисков сервера.
+    public string SqlServer { get => _sqlServer; set => Set(ref _sqlServer, value); }
+    public string SqlDatabase { get => _sqlDatabase; set => Set(ref _sqlDatabase, value); }
+    public string SqlUser { get => _sqlUser; set => Set(ref _sqlUser, value); }
+    public string SqlPassword { get => _sqlPassword; set => Set(ref _sqlPassword, value); }
     public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
     public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value); }
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
@@ -1283,7 +1350,7 @@ public sealed class MonitorSettings : NotifyBase
     public decimal DiskAlert { get => _diskAlert; set => Set(ref _diskAlert, value); }
     private static string FileName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor", "settings.json");
     public static MonitorSettings Load() { try { if (File.Exists(FileName)) return JsonSerializer.Deserialize<MonitorSettings>(File.ReadAllText(FileName)) ?? new(); } catch { } return new(); }
-    public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; ClusterPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; } }
+    public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; var sqlPwd = SqlPassword; ClusterPassword = ""; SqlPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; SqlPassword = sqlPwd; } }
 }
 
 public sealed class ProcessRow
@@ -1322,7 +1389,7 @@ internal sealed record RacProcess(int Pid, string ProcessUuid, double MemoryMb, 
 internal sealed record InfoBaseRef(string Uuid, string Name, bool ScheduledJobsDenied);
 internal sealed record ConnectionLink(int Pid, string Operation, string DbRequest, string Host, string InfoBase, string Application, DateTime ConnectedAt, int ConnId);
 internal sealed class RacSnapshot { public Dictionary<int, RacProcess> Processes { get; } = new(); public Dictionary<string, InfoBaseRef> InfoBases { get; } = new(StringComparer.OrdinalIgnoreCase); public List<SessionRow> Sessions { get; } = new(); }
-internal readonly record struct DiskSnapshot(bool Available, double UsagePercent, double ReadBytesPerSec, double WriteBytesPerSec, double QueueLength);
+internal readonly record struct DiskSnapshot(bool Available, double UsagePercent, double ReadBytesPerSec, double WriteBytesPerSec, double QueueLength, string? DisksLabel = null);
 internal readonly record struct NetworkSnapshot(bool Available, double ReceiveBytesPerSec, double SendBytesPerSec, double UtilizationPercent, int InterfaceCount);
 
 internal sealed class NetworkPerformanceMonitor : IDisposable
@@ -1363,8 +1430,11 @@ internal sealed class NetworkPerformanceMonitor : IDisposable
 internal sealed class DiskPerformanceMonitor : IDisposable
 {
     private const uint PdhFmtDouble = 0x00000200;
+    private const uint PdhMoreData = 0x800007D2;
     private IntPtr _query, _usage, _read, _write, _queue;
     private bool _ready, _disposed;
+    // Буквы дисков с файлами базы данных SQL ("D:", "E:"). Пустой список — контроль всех дисков (_Total).
+    private string[] _targetDrives = Array.Empty<string>();
 
     public DiskPerformanceMonitor()
     {
@@ -1372,14 +1442,25 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         try
         {
             if (PdhOpenQuery(null, IntPtr.Zero, out _query) != 0) return;
-            if (PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\% Disk Time", IntPtr.Zero, out _usage) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Disk Read Bytes/sec", IntPtr.Zero, out _read) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Disk Write Bytes/sec", IntPtr.Zero, out _write) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Avg. Disk Queue Length", IntPtr.Zero, out _queue) != 0) return;
+            // Счётчики добавляются по всем экземплярам PhysicalDisk ('*'), а не только по '_Total':
+            // это позволяет опрашивать именно тот диск, на котором развернута база данных SQL,
+            // без пересоздания запроса при смене настроек.
+            if (PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\% Disk Time", IntPtr.Zero, out _usage) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Disk Read Bytes/sec", IntPtr.Zero, out _read) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Disk Write Bytes/sec", IntPtr.Zero, out _write) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Avg. Disk Queue Length", IntPtr.Zero, out _queue) != 0) return;
             // Первое измерение создаёт базовую точку для скоростных счётчиков.
             _ready = PdhCollectQueryData(_query) == 0;
         }
         catch { _ready = false; }
+    }
+
+    /// <summary>Ограничивает опрос дисками с указанными буквами (например "D:"). Пустой список — все диски.</summary>
+    public void SetTargetDrives(IEnumerable<string> drives)
+    {
+        _targetDrives = drives.Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant())
+            .Where(x => x.Length == 2 && x[1] == ':' && char.IsLetter(x[0]))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public DiskSnapshot Sample()
@@ -1388,19 +1469,58 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         try
         {
             if (PdhCollectQueryData(_query) != 0) return default;
-            if (!TryValue(_usage, out var usage)) return default;
-            TryValue(_read, out var read); TryValue(_write, out var write); TryValue(_queue, out var queue);
-            return new(true, Math.Clamp(usage, 0, 100), Math.Max(0, read), Math.Max(0, write), Math.Max(0, queue));
+            var usage = ReadInstances(_usage);
+            if (usage.Count == 0) return default;
+            var read = ReadInstances(_read); var write = ReadInstances(_write); var queue = ReadInstances(_queue);
+
+            // Имена экземпляров PhysicalDisk имеют вид "0 C:", "1 D: E:", "_Total".
+            // Выбираем экземпляры, содержащие буквы томов, на которых лежат файлы базы данных.
+            var matched = _targetDrives.Length == 0
+                ? new List<string>()
+                : usage.Keys.Where(name => !name.Equals("_Total", StringComparison.OrdinalIgnoreCase) &&
+                    name.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(token => _targetDrives.Contains(token, StringComparer.OrdinalIgnoreCase))).ToList();
+
+            if (matched.Count > 0)
+            {
+                var label = string.Join(", ", matched.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                var u = matched.Max(x => usage.GetValueOrDefault(x));
+                var r = matched.Sum(x => read.GetValueOrDefault(x));
+                var w = matched.Sum(x => write.GetValueOrDefault(x));
+                var q = matched.Sum(x => queue.GetValueOrDefault(x));
+                return new(true, Math.Clamp(u, 0, 100), Math.Max(0, r), Math.Max(0, w), Math.Max(0, q), label);
+            }
+
+            // Диск базы не задан или экземпляр не найден — прежнее поведение: суммарный '_Total'.
+            var totalUsage = usage.TryGetValue("_Total", out var tu) ? tu : usage.Values.Max();
+            var totalRead = read.TryGetValue("_Total", out var tr) ? tr : read.Values.Sum();
+            var totalWrite = write.TryGetValue("_Total", out var tw) ? tw : write.Values.Sum();
+            var totalQueue = queue.TryGetValue("_Total", out var tq) ? tq : queue.Values.Sum();
+            return new(true, Math.Clamp(totalUsage, 0, 100), Math.Max(0, totalRead), Math.Max(0, totalWrite), Math.Max(0, totalQueue));
         }
         catch { return default; }
     }
 
-    private static bool TryValue(IntPtr counter, out double value)
+    private static Dictionary<string, double> ReadInstances(IntPtr counter)
     {
-        value = 0; if (counter == IntPtr.Zero) return false;
-        var result = PdhGetFormattedCounterValue(counter, PdhFmtDouble, out _, out var formatted);
-        if (result != 0 || formatted.CStatus != 0 || double.IsNaN(formatted.DoubleValue) || double.IsInfinity(formatted.DoubleValue)) return false;
-        value = formatted.DoubleValue; return true;
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        if (counter == IntPtr.Zero) return result;
+        uint size = 0, count = 0;
+        if (PdhGetFormattedCounterArray(counter, PdhFmtDouble, ref size, ref count, IntPtr.Zero) != PdhMoreData || size == 0) return result;
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            if (PdhGetFormattedCounterArray(counter, PdhFmtDouble, ref size, ref count, buffer) != 0) return result;
+            var itemSize = Marshal.SizeOf<PdhFmtCounterValueItem>();
+            for (var i = 0; i < count; i++)
+            {
+                var item = Marshal.PtrToStructure<PdhFmtCounterValueItem>(IntPtr.Add(buffer, i * itemSize));
+                if (item.Value.CStatus != 0 || double.IsNaN(item.Value.DoubleValue) || double.IsInfinity(item.Value.DoubleValue)) continue;
+                var name = Marshal.PtrToStringUni(item.Name);
+                if (!string.IsNullOrWhiteSpace(name)) result[name] = item.Value.DoubleValue;
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+        return result;
     }
 
     public void Dispose()
@@ -1415,10 +1535,16 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         [FieldOffset(0)] public uint CStatus;
         [FieldOffset(8)] public double DoubleValue;
     }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PdhFmtCounterValueItem
+    {
+        public IntPtr Name;       // LPWSTR szName
+        public PdhFmtCounterValue Value;
+    }
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhOpenQuery(string? dataSource, IntPtr userData, out IntPtr query);
     [DllImport("pdh.dll", CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")] private static extern uint PdhAddEnglishCounter(IntPtr query, string path, IntPtr userData, out IntPtr counter);
     [DllImport("pdh.dll")] private static extern uint PdhCollectQueryData(IntPtr query);
-    [DllImport("pdh.dll")] private static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, out uint type, out PdhFmtCounterValue value);
+    [DllImport("pdh.dll", EntryPoint = "PdhGetFormattedCounterArrayW")] private static extern uint PdhGetFormattedCounterArray(IntPtr counter, uint format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
     [DllImport("pdh.dll")] private static extern uint PdhCloseQuery(IntPtr query);
 }
 
