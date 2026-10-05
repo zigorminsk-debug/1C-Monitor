@@ -23,6 +23,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public ICommand RefreshCommand { get; }
     public ICommand ExportCommand { get; }
     public ICommand SaveSettingsCommand { get; }
+    public ICommand TestSqlConnectionCommand { get; }
     public ICommand StartRasCommand { get; }
     public ICommand OpenWebsiteCommand { get; }
     public ICommand OpenEmailCommand { get; }
@@ -79,6 +80,13 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
         ExportCommand = new RelayCommand(ExportHtmlReport);
         SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; _lastSqlDrivesRefresh = DateTime.MinValue; await RefreshAsync(true); });
+        TestSqlConnectionCommand = new RelayCommand(async () =>
+        {
+            Settings.Save();
+            SqlDiskStatus = "Проверка подключения к SQL…";
+            _lastSqlDrivesRefresh = DateTime.Now; // плановая перепроверка откладывается — проверяем прямо сейчас
+            await RefreshSqlDataDrivesAsync();
+        });
         StartRasCommand = new RelayCommand(async () => await StartRasAsync());
         OpenWebsiteCommand = new RelayCommand(() => OpenUri("https://csl.by"));
         OpenEmailCommand = new RelayCommand(() => OpenUri("mailto:info@csl.by"));
@@ -177,13 +185,19 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             SqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
             return;
         }
+        if (!Settings.SqlWindowsAuth && string.IsNullOrWhiteSpace(Settings.SqlUser))
+        {
+            SqlDiskStatus = "Выбрана авторизация SQL Server, но пользователь не указан. Заполните пользователя и пароль или включите учётные данные Windows.";
+            return;
+        }
         try
         {
             // Через sys.master_files узнаём, на каких томах лежат файлы базы данных (mdf/ndf/ldf),
             // чтобы счётчики PhysicalDisk опрашивали только диск СУБД, а не все диски сервера.
             // Используется System.Data.SqlClient из Windows PowerShell — дополнительные драйверы не нужны.
+            // Авторизация: учётные данные Windows (Integrated Security) либо логин и пароль SQL Server.
             var connection = $"Server={server};Encrypt=False;TrustServerCertificate=True;Connect Timeout=5;Application Name=1C Server Monitor;"
-                + (string.IsNullOrWhiteSpace(Settings.SqlUser)
+                + (Settings.SqlWindowsAuth
                     ? "Integrated Security=True;"
                     : $"User ID={Settings.SqlUser};Password={Settings.SqlPassword};");
             var database = (Settings.SqlDatabase ?? "").Trim().Replace("'", "''");
@@ -1314,7 +1328,7 @@ public sealed class MonitorSettings : NotifyBase
 {
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
     private string _sqlServer = "", _sqlDatabase = "", _sqlUser = "", _sqlPassword = "";
-    private bool _autoDailyReport = true, _autoDrainEnabled = false;
+    private bool _autoDailyReport = true, _autoDrainEnabled = false, _sqlWindowsAuth = true;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30;
     public string RacPath { get => _racPath; set => Set(ref _racPath, value); }
@@ -1327,6 +1341,8 @@ public sealed class MonitorSettings : NotifyBase
     // и опрашивать очередь/нагрузку только этого диска, а не всех дисков сервера.
     public string SqlServer { get => _sqlServer; set => Set(ref _sqlServer, value); }
     public string SqlDatabase { get => _sqlDatabase; set => Set(ref _sqlDatabase, value); }
+    // true — проверка подлинности Windows (Integrated Security), false — логин и пароль SQL Server.
+    public bool SqlWindowsAuth { get => _sqlWindowsAuth; set => Set(ref _sqlWindowsAuth, value); }
     public string SqlUser { get => _sqlUser; set => Set(ref _sqlUser, value); }
     public string SqlPassword { get => _sqlPassword; set => Set(ref _sqlPassword, value); }
     public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
