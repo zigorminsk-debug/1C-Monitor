@@ -74,7 +74,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
     private IBrush _statusColor = Brushes.Goldenrod;
     private int _processCount, _sessionCount, _activeSessionCount, _sleepingSessionCount, _alertCount;
-    private string _totalMemoryText = "—", _totalCpuText = "—", _diskUsageText = "—", _diskIoText = "чтение — • запись —", _diskQueueText = "очередь —", _sessionBreakdownText = "активные — • спящие —", _logText = "";
+    private string _totalMemoryText = "—", _totalCpuText = "—", _diskUsageText = "—", _diskIoText = "чтение — • запись —", _diskQueueText = "очередь —", _diskScopeText = "PhysicalDisk (_Total)", _sessionBreakdownText = "активные — • спящие —", _logText = "";
 
     public MainViewModel()
     {
@@ -139,6 +139,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string DiskUsageText { get => _diskUsageText; private set => Set(ref _diskUsageText, value); }
     public string DiskIoText { get => _diskIoText; private set => Set(ref _diskIoText, value); }
     public string DiskQueueText { get => _diskQueueText; private set => Set(ref _diskQueueText, value); }
+    public string DiskScopeText { get => _diskScopeText; private set => Set(ref _diskScopeText, value); }
     public string SessionBreakdownText { get => _sessionBreakdownText; private set => Set(ref _sessionBreakdownText, value); }
     public string LogText { get => _logText; private set => Set(ref _logText, value); }
 
@@ -476,7 +477,10 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
                 DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
                 DiskIoText = disk.Available ? $"чтение {FormatRate(disk.ReadBytesPerSec)} • запись {FormatRate(disk.WriteBytesPerSec)}" : "счётчики недоступны";
-                DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)} · {DiskScopeLabel(disk)}" : "Windows PDH";
+                DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)}" : "Windows PDH";
+                DiskScopeText = disk.Available
+                    ? (string.IsNullOrWhiteSpace(disk.DisksLabel) ? "PhysicalDisk (_Total) · все диски" : $"PhysicalDisk ({disk.DisksLabel}) · диск БД")
+                    : "PhysicalDisk";
                 Status = deviations.Count > 0 ? $"Отклонения: {deviations.Count} · {string.Join("; ", deviations.Take(3))}{(deviations.Count > 3 ? "; … подробнее на вкладке «Обзор»" : "")}" : "Нагрузка в норме";
                 StatusColor = deviations.Count > 0 ? Brushes.LightCoral : Brushes.LightGreen;
                 Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
@@ -597,7 +601,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             ServerParam("Процессор", GetCpuDescription()); ServerParam("Логические процессоры", Environment.ProcessorCount.ToString()); ServerParam("Оперативная память", GetPhysicalMemory());
             ServerParam("Тип сервера и виртуализация", _virtualizationInfo); ServerParam("Физические накопители", _physicalDiskInfo); ServerParam("Тома, занято и свободно", GetVolumeSummary());
             ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Контроль диска СУБД", SqlDiskStatus); ServerParam("Выбор дисков мониторинга", ManualDiskStatus); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
-            ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
+            ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText} · {DiskScopeText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
             sb.Append("</tbody></table><p class=\"sub\">Отчёт описывает фактически наблюдавшийся период. Средние и максимальные значения рассчитаны по измерениям программы, а нагрузка пользователей сопоставлена с сеансами и процессами 1С через RAC.</p></section>");
             sb.Append("<section><h2>Рост нагрузки по часам</h2><table><thead><tr><th>Час</th><th>CPU сред.</th><th>CPU макс.</th><th>RAM сред.</th><th>RAM макс.</th><th>Диск сред.</th><th>Диск макс.</th><th>Чтение макс.</th><th>Запись макс.</th><th>Очередь</th><th>Сеть ↓</th><th>Сеть ↑</th><th>Сеансы</th></tr></thead><tbody>");
             foreach (var h in hourly) sb.Append($"<tr><td>{h.Hour:00}:00</td><td>{h.AvgCpu:0.0}%</td><td>{h.MaxCpu:0.0}%</td><td>{FormatMb(h.AvgRam)}</td><td>{FormatMb(h.MaxRam)}</td><td>{h.AvgDisk:0.0}%</td><td class=\"{(h.MaxDisk >= 90 ? "bad" : "")}\">{h.MaxDisk:0.0}%</td><td>{FormatRate(h.MaxRead)}</td><td>{FormatRate(h.MaxWrite)}</td><td>{h.MaxQueue:0.0}</td><td>{FormatRate(h.MaxNetIn)}</td><td>{FormatRate(h.MaxNetOut)}</td><td>{h.MaxSessions}</td></tr>");
@@ -1300,7 +1304,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             sb.Append("<div class=\"cards\">");
             Card("Процессы rphost", ProcessCount.ToString()); Card("CPU rphost", TotalCpuText); Card("Память rphost", TotalMemoryText);
             Card("Активные сеансы", ActiveSessionCount.ToString()); Card("Спящие сеансы", SleepingSessionCount.ToString()); Card("Тревоги", AlertCount.ToString());
-            Card("Загрузка диска", DiskUsageText); Card("Ввод-вывод", DiskIoText); Card("Очередь диска", DiskQueueText); Card("Сеть", NetworkLoadText);
+            Card("Загрузка диска", DiskUsageText); Card("Ввод-вывод", DiskIoText); Card("Очередь диска", $"{DiskQueueText} · {DiskScopeText}"); Card("Сеть", NetworkLoadText);
             sb.Append("</div>");
             sb.Append($"<section class=\"section\"><h2>Сервер и накопители</h2><p>{H(ServerHeaderDetails).Replace("\n", "<br>")}</p><p><strong>Оборудование:</strong> {H(ServerHardwareText)}</p><p><strong>Сеть:</strong> {H(NetworkLoadText)}</p></section>");
             sb.Append("<section class=\"section\"><h2>Рабочие процессы</h2><table><thead><tr><th>Риск</th><th>PID</th><th>Состояние процесса</th><th>CPU</th><th>RAM</th><th>Сеансы</th><th>Средний вызов</th><th>Средний запрос БД</th><th class=\"wide\">Пользователи</th><th class=\"wide\">Диагноз</th></tr></thead><tbody>");

@@ -25,11 +25,11 @@
             <Border Grid.Column="4" Classes="card"><StackPanel><TextBlock Text="ТРЕВОГИ" Classes="muted"/><TextBlock Text="{Binding AlertCount}" Classes="h1" Foreground="#FB7185"/><TextBlock Text="требуют внимания" Classes="muted"/></StackPanel></Border>
           </Grid>
           <Border Classes="card">
-            <Grid ColumnDefinitions="180,180,*,160" ColumnSpacing="18">
+            <Grid ColumnDefinitions="180,200,*,Auto" ColumnSpacing="18">
               <StackPanel><TextBlock Text="НАГРУЗКА НА ДИСК" Classes="muted"/><TextBlock Text="{Binding DiskUsageText}" Classes="h1"/></StackPanel>
-              <StackPanel Grid.Column="1"><TextBlock Text="ОЧЕРЕДЬ" Classes="muted"/><TextBlock Text="{Binding DiskQueueText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
-              <StackPanel Grid.Column="2"><TextBlock Text="СКОРОСТЬ ВВОДА-ВЫВОДА" Classes="muted"/><TextBlock Text="{Binding DiskIoText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
-              <TextBlock Grid.Column="3" Text="PhysicalDisk (_Total)" Classes="muted" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+              <StackPanel Grid.Column="1"><TextBlock Text="ОЧЕРЕДЬ" Classes="muted"/><TextBlock Text="{Binding DiskQueueText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" ToolTip.Tip="{Binding DiskScopeText}"/></StackPanel>
+              <StackPanel Grid.Column="2"><TextBlock Text="СКОРОСТЬ ВВОДА-ВЫВОДА" Classes="muted"/><TextBlock Text="{Binding DiskIoText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/></StackPanel>
+              <TextBlock Grid.Column="3" Text="{Binding DiskScopeText}" Classes="muted" VerticalAlignment="Center" HorizontalAlignment="Right" TextWrapping="Wrap" MaxWidth="260" TextAlignment="Right" ToolTip.Tip="{Binding ManualDiskStatus}"/>
             </Grid>
           </Border>
           <Border Classes="card">
