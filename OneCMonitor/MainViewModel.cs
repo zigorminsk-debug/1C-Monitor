@@ -66,6 +66,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private string _serverHardwareText = "Определение оборудования…", _networkLoadText = "Сеть: ожидание первого измерения…";
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
+    private bool _autoTerminateSleepingEnabled;
+    private string _autoSleepStatus = "Автозавершение спящих сеансов выключено";
+    private DateTime _lastAutoSleepTerminate = DateTime.MinValue;
     private string _sqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
     private string _manualDiskStatus = "";
     private string[] _sqlDrives = Array.Empty<string>();
@@ -82,6 +85,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         Settings = MonitorSettings.Load();
         Settings.BackgroundJobsDisabledInfobases ??= new();
         Settings.MonitorDrives ??= new();
+        _autoTerminateSleepingEnabled = Settings.AutoTerminateSleeping;
+        if (_autoTerminateSleepingEnabled) _autoSleepStatus = "Автозавершение спящих сеансов включено";
         InitializeDriveOptions();
         ApplyDiskTargets();
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
@@ -127,6 +132,21 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string AdminConfirmationText { get => _adminConfirmationText; set => Set(ref _adminConfirmationText, value); }
     public string AdminActionStatus { get => _adminActionStatus; private set => Set(ref _adminActionStatus, value); }
     public string AutoDrainStatus { get => _autoDrainStatus; private set => Set(ref _autoDrainStatus, value); }
+    public string AutoSleepStatus { get => _autoSleepStatus; private set => Set(ref _autoSleepStatus, value); }
+    public bool AutoTerminateSleepingEnabled
+    {
+        get => _autoTerminateSleepingEnabled;
+        set
+        {
+            if (!Set(ref _autoTerminateSleepingEnabled, value)) return;
+            Settings.AutoTerminateSleeping = value;
+            try { Settings.Save(); } catch (Exception ex) { Log("Сохранение настройки автозавершения: " + ex.Message); }
+            AutoSleepStatus = value
+                ? "Автозавершение спящих сеансов включено: все спящие сеансы будут завершаться при каждом опросе RAC"
+                : "Автозавершение спящих сеансов выключено";
+            Log(AutoSleepStatus);
+        }
+    }
     public string SqlDiskStatus { get => _sqlDiskStatus; private set => Set(ref _sqlDiskStatus, value); }
     public string ManualDiskStatus { get => _manualDiskStatus; private set => Set(ref _manualDiskStatus, value); }
     public ProcessRow? SelectedProcess { get => _selectedProcess; set => Set(ref _selectedProcess, value); }
@@ -429,6 +449,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             }
 
             var sessions = rac?.Sessions ?? new List<SessionRow>();
+            if (racDue) await AutoTerminateSleepingAsync(sessions, now);
             if (racDue && (manual || now - _lastTechLogScan >= TimeSpan.FromSeconds(Math.Max(15, (double)Settings.TechLogPollSeconds))))
             {
                 ApplyTechLog(sessions); _lastTechLogScan = now;
@@ -883,28 +904,57 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         foreach (var s in targets.Where(x => !string.IsNullOrWhiteSpace(x.SessionUuid)))
         {
             AdminActionStatus = $"Завершается сеанс {s.UserName} ({ok + errors + 1}/{targets.Count})…";
-            var auth = new List<string> { $"--cluster={_lastClusterId}" };
-            if (!string.IsNullOrWhiteSpace(Settings.ClusterUser)) { auth.Add($"--cluster-user={Settings.ClusterUser}"); auth.Add($"--cluster-pwd={Settings.ClusterPassword}"); }
-            var variants = new List<List<string>>
-            {
-                new() { "session" },
-                new() { "session", "terminate" },
-                new() { Settings.Endpoint, "session" }
-            };
-            variants[0].AddRange(auth); variants[0].Add("terminate"); variants[0].Add($"--session={s.SessionUuid}"); variants[0].Add(Settings.Endpoint);
-            variants[1].AddRange(auth); variants[1].Add($"--session={s.SessionUuid}"); variants[1].Add(Settings.Endpoint);
-            variants[2].AddRange(auth); variants[2].Add("terminate"); variants[2].Add($"--session={s.SessionUuid}");
-            Exception? last = null; var terminated = false;
-            foreach (var args in variants)
-            {
-                try { await RunAsync(_lastRacPath, args); terminated = true; break; }
-                catch (Exception ex) { last = ex; }
-            }
+            var (terminated, error) = await TerminateSessionCoreAsync(s);
             if (terminated) { ok++; Log($"Сеанс завершён: {s.UserName}, UUID {s.SessionUuid}"); }
-            else { errors++; Log($"Не завершён сеанс {s.UserName}: {last?.Message}"); }
+            else { errors++; Log($"Не завершён сеанс {s.UserName}: {error}"); }
         }
         await Task.Delay(1200);
         AdminConfirmationText = ""; AdminActionStatus = $"Завершение {description}: успешно {ok}, ошибок {errors}. Подробности во вкладке «Журнал»."; Log(AdminActionStatus); await RefreshAsync(true);
+    }
+
+    // Завершение одного сеанса через RAC: используется и кнопками, и автозавершением спящих сеансов.
+    private async Task<(bool Ok, string? Error)> TerminateSessionCoreAsync(SessionRow s)
+    {
+        if (_lastRacPath == null || _lastClusterId == null) return (false, "нет подключения RAC");
+        if (string.IsNullOrWhiteSpace(s.SessionUuid)) return (false, "у сеанса нет UUID");
+        var auth = new List<string> { $"--cluster={_lastClusterId}" };
+        if (!string.IsNullOrWhiteSpace(Settings.ClusterUser)) { auth.Add($"--cluster-user={Settings.ClusterUser}"); auth.Add($"--cluster-pwd={Settings.ClusterPassword}"); }
+        var variants = new List<List<string>>
+        {
+            new() { "session" },
+            new() { "session", "terminate" },
+            new() { Settings.Endpoint, "session" }
+        };
+        variants[0].AddRange(auth); variants[0].Add("terminate"); variants[0].Add($"--session={s.SessionUuid}"); variants[0].Add(Settings.Endpoint);
+        variants[1].AddRange(auth); variants[1].Add($"--session={s.SessionUuid}"); variants[1].Add(Settings.Endpoint);
+        variants[2].AddRange(auth); variants[2].Add("terminate"); variants[2].Add($"--session={s.SessionUuid}");
+        Exception? last = null;
+        foreach (var args in variants)
+        {
+            try { await RunAsync(_lastRacPath, args); return (true, null); }
+            catch (Exception ex) { last = ex; }
+        }
+        return (false, last?.Message);
+    }
+
+    // Автоматическое завершение всех спящих сеансов (без контрольной фразы — включается тумблером в администрировании).
+    private async Task AutoTerminateSleepingAsync(List<SessionRow> sessions, DateTime now)
+    {
+        if (!Settings.AutoTerminateSleeping) return;
+        if (_lastRacPath == null || _lastClusterId == null) { AutoSleepStatus = "Автозавершение спящих: нет подключения RAC"; return; }
+        var sleeping = sessions.Where(x => x.IsSleeping && !string.IsNullOrWhiteSpace(x.SessionUuid)).ToList();
+        if (sleeping.Count == 0) { AutoSleepStatus = $"Автозавершение спящих включено · спящих сеансов нет ({now:HH:mm:ss})"; return; }
+        if ((now - _lastAutoSleepTerminate).TotalSeconds < 60) return; // защита от повторного залпа, пока RAC не обновил список
+        _lastAutoSleepTerminate = now;
+        var ok = 0; var errors = 0;
+        foreach (var s in sleeping)
+        {
+            var (terminated, error) = await TerminateSessionCoreAsync(s);
+            if (terminated) { ok++; Log($"Автозавершение: спящий сеанс завершён — {s.UserName}, база {s.InfoBase}, UUID {s.SessionUuid}"); }
+            else { errors++; Log($"Автозавершение: не завершён спящий сеанс {s.UserName}: {error}"); }
+        }
+        AutoSleepStatus = $"Автозавершение спящих: завершено {ok}, ошибок {errors} ({now:HH:mm:ss})";
+        Log(AutoSleepStatus);
     }
 
     private async Task RestartOneCServicesAsync()
@@ -1559,7 +1609,7 @@ public sealed class MonitorSettings : NotifyBase
 {
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
     private string _sqlServer = "", _sqlDatabase = "", _sqlUser = "", _sqlPassword = "";
-    private bool _autoDailyReport = true, _autoDrainEnabled = false, _sqlWindowsAuth = true;
+    private bool _autoDailyReport = true, _autoDrainEnabled = false, _sqlWindowsAuth = true, _autoTerminateSleeping = false;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30;
     public string RacPath { get => _racPath; set => Set(ref _racPath, value); }
@@ -1583,6 +1633,8 @@ public sealed class MonitorSettings : NotifyBase
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
     public List<string> BackgroundJobsDisabledInfobases { get; set; } = new();
     public bool AutoDrainEnabled { get => _autoDrainEnabled; set => Set(ref _autoDrainEnabled, value); }
+    // Автоматически завершать все спящие сеансы при каждом опросе RAC.
+    public bool AutoTerminateSleeping { get => _autoTerminateSleeping; set => Set(ref _autoTerminateSleeping, value); }
     public decimal AutoDrainMemoryMb { get => _autoDrainMemoryMb; set => Set(ref _autoDrainMemoryMb, value); }
     public decimal AutoDrainMinutes { get => _autoDrainMinutes; set => Set(ref _autoDrainMinutes, value); }
     public decimal AutoDrainMinProcesses { get => _autoDrainMinProcesses; set => Set(ref _autoDrainMinProcesses, value); }

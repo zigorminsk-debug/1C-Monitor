@@ -119,6 +119,9 @@
               <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10"/>
             </WrapPanel>
             <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются." Classes="muted" TextWrapping="Wrap"/>
+            <ToggleSwitch IsChecked="{Binding AutoTerminateSleepingEnabled}" OnContent="Завершать спящие сеансы автоматически — включено" OffContent="Завершать спящие сеансы автоматически — выключено"/>
+            <TextBlock Text="{Binding AutoSleepStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            <TextBlock Text="При включении все спящие сеансы завершаются сразу при каждом опросе RAC, без контрольной фразы. Настройка сохраняется и действует после перезапуска программы." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Фоновые и регламентные задания" FontSize="17" FontWeight="SemiBold"/>
