@@ -19,6 +19,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public ObservableCollection<ProcessRow> Processes { get; } = new();
     public ObservableCollection<SessionRow> Sessions { get; } = new();
     public ObservableCollection<AlertRow> Alerts { get; } = new();
+    public ObservableCollection<DriveOption> MonitorDriveOptions { get; } = new();
     public MonitorSettings Settings { get; }
     public ICommand RefreshCommand { get; }
     public ICommand ExportCommand { get; }
@@ -66,6 +67,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
     private string _sqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
+    private string _manualDiskStatus = "";
+    private string[] _sqlDrives = Array.Empty<string>();
     private ProcessRow? _selectedProcess;
     private string? _lastRacPath, _lastClusterId;
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
@@ -77,6 +80,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         Settings = MonitorSettings.Load();
         Settings.BackgroundJobsDisabledInfobases ??= new();
+        Settings.MonitorDrives ??= new();
+        InitializeDriveOptions();
+        ApplyDiskTargets();
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
         ExportCommand = new RelayCommand(ExportHtmlReport);
         SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; _lastSqlDrivesRefresh = DateTime.MinValue; await RefreshAsync(true); });
@@ -121,6 +127,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string AdminActionStatus { get => _adminActionStatus; private set => Set(ref _adminActionStatus, value); }
     public string AutoDrainStatus { get => _autoDrainStatus; private set => Set(ref _autoDrainStatus, value); }
     public string SqlDiskStatus { get => _sqlDiskStatus; private set => Set(ref _sqlDiskStatus, value); }
+    public string ManualDiskStatus { get => _manualDiskStatus; private set => Set(ref _manualDiskStatus, value); }
     public ProcessRow? SelectedProcess { get => _selectedProcess; set => Set(ref _selectedProcess, value); }
     public int ProcessCount { get => _processCount; private set => Set(ref _processCount, value); }
     public int SessionCount { get => _sessionCount; private set => Set(ref _sessionCount, value); }
@@ -175,13 +182,63 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         catch (Exception ex) { _physicalDiskInfo = "Накопители: тип не определён"; Log("Определение SSD/HDD/NVMe: " + ex.Message); }
     }
 
+    private void InitializeDriveOptions()
+    {
+        try
+        {
+            var selected = new HashSet<string>((Settings.MonitorDrives ?? new()).Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant()).Where(x => x.Length == 2 && x[1] == ':'), StringComparer.OrdinalIgnoreCase);
+            foreach (var d in DriveInfo.GetDrives().Where(d => d.IsReady && d.DriveType == DriveType.Fixed))
+            {
+                var letter = d.Name.TrimEnd('\\').ToUpperInvariant();
+                if (letter.Length != 2 || letter[1] != ':' || !char.IsLetter(letter[0])) continue;
+                string label;
+                try { label = $"{letter} ({d.TotalSize / 1073741824d:0} ГБ)"; } catch { label = letter; }
+                MonitorDriveOptions.Add(new DriveOption(letter, label, selected.Contains(letter), OnDriveOptionChanged));
+            }
+            // Отмеченные ранее диски, которых сейчас нет в системе, тоже показываем, чтобы выбор не потерялся.
+            foreach (var letter in selected.Where(l => MonitorDriveOptions.All(o => !o.Letter.Equals(l, StringComparison.OrdinalIgnoreCase))).ToList())
+                MonitorDriveOptions.Add(new DriveOption(letter, letter + " (сейчас недоступен)", true, OnDriveOptionChanged));
+        }
+        catch (Exception ex) { Log("Список дисков для мониторинга: " + ex.Message); }
+    }
+
+    private void OnDriveOptionChanged()
+    {
+        Settings.MonitorDrives = MonitorDriveOptions.Where(x => x.IsChecked).Select(x => x.Letter).ToList();
+        try { Settings.Save(); } catch (Exception ex) { Log("Сохранение выбора дисков: " + ex.Message); }
+        ApplyDiskTargets();
+    }
+
+    // Приоритет источников: ручной выбор чекбоксами → диск базы из SQL → все диски (_Total).
+    private void ApplyDiskTargets()
+    {
+        var manual = (Settings.MonitorDrives ?? new()).Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant())
+            .Where(x => x.Length == 2 && x[1] == ':' && char.IsLetter(x[0])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (manual.Length > 0)
+        {
+            _disk.SetTargetDrives(manual);
+            ManualDiskStatus = $"Вручную выбрано: {string.Join(", ", manual)} — очередь и нагрузка считаются только по этим дискам (приоритет над SQL)";
+        }
+        else if (_sqlDrives.Length > 0)
+        {
+            _disk.SetTargetDrives(_sqlDrives);
+            ManualDiskStatus = $"Диски не отмечены — используется диск базы данных SQL: {string.Join(", ", _sqlDrives)}";
+        }
+        else
+        {
+            _disk.SetTargetDrives(Array.Empty<string>());
+            ManualDiskStatus = "Диски не отмечены — используются все физические диски (_Total), пока SQL не определит диск базы";
+        }
+    }
+
     private async Task RefreshSqlDataDrivesAsync()
     {
         if (!OperatingSystem.IsWindows()) return;
         var server = (Settings.SqlServer ?? "").Trim();
         if (server.Length == 0)
         {
-            _disk.SetTargetDrives(Array.Empty<string>());
+            _sqlDrives = Array.Empty<string>();
+            ApplyDiskTargets();
             SqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
             return;
         }
@@ -214,15 +271,18 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
             if (drives.Length == 0)
             {
-                _disk.SetTargetDrives(Array.Empty<string>());
+                _sqlDrives = Array.Empty<string>();
+                ApplyDiskTargets();
                 SqlDiskStatus = database.Length > 0
                     ? $"SQL {server}: файлы базы «{Settings.SqlDatabase}» не найдены (проверьте имя базы) — используется _Total"
                     : $"SQL {server}: пользовательские базы не найдены — используется _Total";
                 Log(SqlDiskStatus);
                 return;
             }
-            _disk.SetTargetDrives(drives);
-            SqlDiskStatus = $"SQL {server}: база развернута на диске {string.Join(", ", drives)} — очередь и нагрузка опрашиваются только по нему";
+            _sqlDrives = drives;
+            ApplyDiskTargets();
+            SqlDiskStatus = $"SQL {server}: база развернута на диске {string.Join(", ", drives)} — очередь и нагрузка опрашиваются только по нему"
+                + ((Settings.MonitorDrives?.Count ?? 0) > 0 ? ". Внимание: сейчас действует ручной выбор дисков" : "");
             LogOnce("sql-drives:" + string.Join(",", drives), SqlDiskStatus, TimeSpan.FromHours(1));
         }
         catch (Exception ex)
@@ -536,7 +596,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             ServerParam("Имя сервера", Environment.MachineName); ServerParam("Операционная система", RuntimeInformation.OSDescription.Trim()); ServerParam("Архитектура ОС", RuntimeInformation.OSArchitecture.ToString());
             ServerParam("Процессор", GetCpuDescription()); ServerParam("Логические процессоры", Environment.ProcessorCount.ToString()); ServerParam("Оперативная память", GetPhysicalMemory());
             ServerParam("Тип сервера и виртуализация", _virtualizationInfo); ServerParam("Физические накопители", _physicalDiskInfo); ServerParam("Тома, занято и свободно", GetVolumeSummary());
-            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Контроль диска СУБД", SqlDiskStatus); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
+            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Контроль диска СУБД", SqlDiskStatus); ServerParam("Выбор дисков мониторинга", ManualDiskStatus); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
             ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
             sb.Append("</tbody></table><p class=\"sub\">Отчёт описывает фактически наблюдавшийся период. Средние и максимальные значения рассчитаны по измерениям программы, а нагрузка пользователей сопоставлена с сеансами и процессами 1С через RAC.</p></section>");
             sb.Append("<section><h2>Рост нагрузки по часам</h2><table><thead><tr><th>Час</th><th>CPU сред.</th><th>CPU макс.</th><th>RAM сред.</th><th>RAM макс.</th><th>Диск сред.</th><th>Диск макс.</th><th>Чтение макс.</th><th>Запись макс.</th><th>Очередь</th><th>Сеть ↓</th><th>Сеть ↑</th><th>Сеансы</th></tr></thead><tbody>");
@@ -1345,6 +1405,8 @@ public sealed class MonitorSettings : NotifyBase
     public bool SqlWindowsAuth { get => _sqlWindowsAuth; set => Set(ref _sqlWindowsAuth, value); }
     public string SqlUser { get => _sqlUser; set => Set(ref _sqlUser, value); }
     public string SqlPassword { get => _sqlPassword; set => Set(ref _sqlPassword, value); }
+    // Буквы дисков, отмеченных вручную для мониторинга ("D:"). Пустой список — автоматика (SQL или _Total).
+    public List<string> MonitorDrives { get; set; } = new();
     public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
     public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value); }
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
@@ -1401,6 +1463,15 @@ public sealed class SessionRow
     public string Operation { get; set; } = ""; public string DbRequest { get; set; } = ""; public string Blocked { get; set; } = "нет";
 }
 public sealed record AlertRow(DateTime At, string Severity, string Source, string Message) { public string TimeText => At.ToString("dd.MM.yyyy HH:mm:ss"); }
+public sealed class DriveOption : NotifyBase
+{
+    private bool _isChecked;
+    private readonly Action _changed;
+    public DriveOption(string letter, string label, bool isChecked, Action changed) { Letter = letter; Label = label; _isChecked = isChecked; _changed = changed; }
+    public string Letter { get; }
+    public string Label { get; }
+    public bool IsChecked { get => _isChecked; set { if (Set(ref _isChecked, value)) _changed(); } }
+}
 internal sealed record RacProcess(int Pid, string ProcessUuid, double MemoryMb, double AvgCallMs, double AvgDbMs);
 internal sealed record InfoBaseRef(string Uuid, string Name, bool ScheduledJobsDenied);
 internal sealed record ConnectionLink(int Pid, string Operation, string DbRequest, string Host, string InfoBase, string Application, DateTime ConnectedAt, int ConnId);

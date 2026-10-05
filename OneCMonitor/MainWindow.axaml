@@ -171,6 +171,18 @@
             <TextBlock Text="Диск базы также перепроверяется автоматически каждые 5 минут." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Диски для мониторинга" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Отметьте диски, по которым считать очередь и нагрузку. Ручной выбор имеет приоритет над диском, найденным через SQL. Если ничего не отмечено — используется диск базы данных SQL, а без подключения SQL — суммарно все физические диски (_Total)." Classes="muted" TextWrapping="Wrap"/>
+            <ItemsControl ItemsSource="{Binding MonitorDriveOptions}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate><DataTemplate>
+                <CheckBox IsChecked="{Binding IsChecked}" Content="{Binding Label}" Margin="0,0,18,4"/>
+              </DataTemplate></ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Text="{Binding ManualDiskStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            <TextBlock Text="Выбор сохраняется и применяется сразу, без кнопки «Сохранить»." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автоматический суточный отчёт" FontSize="17" FontWeight="SemiBold"/>
             <ToggleSwitch IsChecked="{Binding Settings.AutoDailyReport}" OnContent="Включён, ежедневно в 23:55" OffContent="Выключен"/>
             <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="10">
