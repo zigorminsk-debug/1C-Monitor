@@ -40,7 +40,7 @@
             </StackPanel>
           </Border>
           <Border Classes="card">
-            <Grid RowDefinitions="Auto,*"><StackPanel><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="Процессы rphost" FontSize="16" FontWeight="SemiBold"/><TextBlock Text="Красная оценка означает вероятный источник зависания" Classes="muted" VerticalAlignment="Center"/></StackPanel><TextBlock Text="{Binding AutoDrainStatus}" Foreground="#60A5FA" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel>
+            <Grid RowDefinitions="Auto,*"><StackPanel><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="Процессы rphost" FontSize="16" FontWeight="SemiBold"/><TextBlock Text="Красная оценка означает вероятный источник зависания. PID — номер рабочего процесса rphost в Windows; по PID из статусной строки и тревог здесь видны CPU, память, сеансы и пользователи процесса." Classes="muted" VerticalAlignment="Center"/></StackPanel><TextBlock Text="{Binding AutoDrainStatus}" Foreground="#60A5FA" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel>
               <DataGrid Grid.Row="1" ItemsSource="{Binding Processes}" SelectedItem="{Binding SelectedProcess}" AutoGenerateColumns="False" IsReadOnly="True" Height="350" Margin="0,12,0,0" CanUserSortColumns="True" CanUserResizeColumns="True">
                 <DataGrid.Columns>
                   <DataGridTextColumn Header="Риск" Binding="{Binding RiskText}" Width="80"/>

@@ -337,10 +337,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 ActiveSessionCount = sessions.Count(x => !x.IsSleeping); SleepingSessionCount = sessions.Count(x => x.IsSleeping);
                 SessionBreakdownText = $"активные {ActiveSessionCount} • спящие {SleepingSessionCount}";
                 var deviations = new List<string>();
+                var procById = local.ToDictionary(x => x.Pid);
+                string ProcNote(int pid) => procById.TryGetValue(pid, out var pr) ? $", rphost PID {pid}: CPU {pr.Cpu:0}%, {pr.MemoryText}" : $", rphost PID {pid}";
                 if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert) deviations.Add($"диск {disk.UsagePercent:0}% ≥ порога {Settings.DiskAlert:0}% (ср. очередь {DiskQueueLabel(disk)})");
-                foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"PID {p.Pid}: {p.Diagnosis}");
-                foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}, PID {s.Pid}{(string.IsNullOrWhiteSpace(s.BlockedTables) ? "" : $", таблицы: {Trunc(s.BlockedTables, 60)}")}");
-                foreach (var s in sessions.Where(x => x.DurationCurrentMs >= (double)Settings.CallAlertMs)) deviations.Add($"долгий вызов {s.DurationCurrentMs / 1000:0} с: {s.UserName}, {s.InfoBase}, PID {s.Pid}{(string.IsNullOrWhiteSpace(s.CurrentTables) ? "" : $", таблицы: {Trunc(s.CurrentTables, 60)}")}");
+                foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"rphost PID {p.Pid} (CPU {p.Cpu:0}%, {p.MemoryText}): {p.Diagnosis}");
+                foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}{ProcNote(s.Pid)}{(string.IsNullOrWhiteSpace(s.BlockedTables) ? "" : $", таблицы: {Trunc(s.BlockedTables, 60)}")}");
+                foreach (var s in sessions.Where(x => x.DurationCurrentMs >= (double)Settings.CallAlertMs)) deviations.Add($"долгий вызов {s.DurationCurrentMs / 1000:0} с: {s.UserName}, {s.InfoBase}{ProcNote(s.Pid)}{(string.IsNullOrWhiteSpace(s.CurrentTables) ? "" : $", таблицы: {Trunc(s.CurrentTables, 60)}")}");
                 AlertCount = deviations.Count;
                 TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
                 DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
@@ -883,8 +885,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert)
             candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал, чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
         foreach (var p in proc.Where(x => x.Risk >= 50)) candidates.Add(($"pid:{p.Pid}", new(now, p.Risk >= 80 ? "КРИТИЧНО" : "ВНИМАНИЕ", $"PID {p.Pid}", p.Diagnosis + (string.IsNullOrEmpty(p.Users) ? "" : $"; пользователи: {p.Users}"))));
-        foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {s.Blocked}{s.BlockedAlertSuffix}")));
-        foreach (var s in sessions.Where(x => x.DurationCurrentMs >= (double)Settings.CallAlertMs)) candidates.Add(($"longcall:{s.SessionUuid}:{s.Pid}", new(now, "ДОЛГИЙ ВЫЗОВ", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {Trunc(s.CurrentCallDetail, 300)}")));
+        foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, рабочий процесс rphost PID {s.Pid}, {s.Blocked}{s.BlockedAlertSuffix}")));
+        foreach (var s in sessions.Where(x => x.DurationCurrentMs >= (double)Settings.CallAlertMs)) candidates.Add(($"longcall:{s.SessionUuid}:{s.Pid}", new(now, "ДОЛГИЙ ВЫЗОВ", s.UserName, $"База {s.InfoBase}, рабочий процесс rphost PID {s.Pid}, {Trunc(s.CurrentCallDetail, 300)}")));
 
         var repeatAfter = TimeSpan.FromSeconds(Math.Max(60, (double)Settings.AlertRepeatSeconds));
         var add = new List<AlertRow>();
