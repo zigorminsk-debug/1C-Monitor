@@ -433,7 +433,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             stat.MaxDbDuration5Min = Math.Max(stat.MaxDbDuration5Min, s.DurationDbLast5MinMs); stat.MaxCalls5Min = Math.Max(stat.MaxCalls5Min, s.CallsLast5Min);
             stat.MaxMemory5MinMb = Math.Max(stat.MaxMemory5MinMb, Math.Abs(s.MemoryLast5MinMb));
             if (!string.IsNullOrWhiteSpace(s.TechContext)) stat.LastContext = s.TechContext;
-            else if (!string.IsNullOrWhiteSpace(s.Operation)) stat.LastContext = s.Operation;
+            else if (!string.IsNullOrWhiteSpace(s.Operation))
+            {
+                var d = OneCServiceNames.Describe(s.Operation);
+                stat.LastContext = d.Length > 0 ? $"{s.Operation} — {d}" : s.Operation;
+            }
             if (!string.IsNullOrWhiteSpace(s.CurrentCallDetail)) stat.LastCallDetail = s.CurrentCallDetail;
         }
         foreach (var old in _dailyUsers.Where(x => x.Value.Date < at.Date.AddDays(-2)).Select(x => x.Key).ToList()) _dailyUsers.Remove(old);
@@ -1533,7 +1537,8 @@ public sealed class SessionRow
         {
             if (DurationCurrentMs <= 0) return "";
             var parts = new List<string> { $"вызов {DurationCurrentMs / 1000:0.0} с" };
-            if (!string.IsNullOrWhiteSpace(Operation)) parts.Add(Operation);
+            var desc = OneCServiceNames.Describe(Operation);
+            if (!string.IsNullOrWhiteSpace(Operation)) parts.Add(desc.Length > 0 ? $"{Operation} — {desc}" : Operation);
             if (!string.IsNullOrWhiteSpace(TechContext)) parts.Add("документ/модуль: " + TechContext);
             if (CurrentTables.Length > 0) parts.Add("таблицы запроса: " + CurrentTables);
             else if (!string.IsNullOrWhiteSpace(DbRequest)) parts.Add("запрос СУБД: " + Trunc(DbRequest, 120));
@@ -1562,7 +1567,8 @@ public sealed class SessionRow
             if (BlockedContext.Length > 0) parts.Add("модуль/документ: " + BlockedContext);
             else if (TechContext.Length > 0) parts.Add("контекст ТЖ: " + TechContext);
             if (BlockedHolder.Length > 0) parts.Add("удерживает: " + BlockedHolder);
-            if (!string.IsNullOrWhiteSpace(Operation)) parts.Add("операция: " + Operation);
+            var opDesc = OneCServiceNames.Describe(Operation);
+            if (!string.IsNullOrWhiteSpace(Operation)) parts.Add("операция: " + Operation + (opDesc.Length > 0 ? $" ({opDesc})" : ""));
             if (!string.IsNullOrWhiteSpace(DbRequest)) parts.Add("запрос СУБД: " + DbRequest);
             if (BlockedByDbms && BlockedTables.Length == 0) parts.Add("для расшифровки таблиц укажите каталог технологического журнала с включёнными классами DBLOCKS и DEADLOCK");
             return string.Join("; ", parts);
@@ -1686,6 +1692,53 @@ internal sealed class DiskPerformanceMonitor : IDisposable
     [DllImport("pdh.dll")] private static extern uint PdhCollectQueryData(IntPtr query);
     [DllImport("pdh.dll")] private static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, out uint type, out PdhFmtCounterValue value);
     [DllImport("pdh.dll")] private static extern uint PdhCloseQuery(IntPtr query);
+}
+
+// Человекочитаемая расшифровка служб и операций сервера 1С, которые RAC показывает
+// в current-service-call / current-service-name. Для неизвестных значений — пустая строка.
+internal static class OneCServiceNames
+{
+    public static string Describe(string operation)
+    {
+        if (string.IsNullOrWhiteSpace(operation)) return "";
+        var o = operation.Trim();
+        foreach (var (key, text) in Exact) if (o.Equals(key, StringComparison.OrdinalIgnoreCase)) return text;
+        foreach (var (key, text) in Part) if (o.Contains(key, StringComparison.OrdinalIgnoreCase)) return text;
+        return "";
+    }
+
+    private static readonly (string Key, string Text)[] Exact =
+    {
+        ("POST_DOCUMENT", "проведение документа"),
+        ("UNPOST_DOCUMENT", "распроведение документа"),
+        ("UPDATE_OBJECTS", "запись объектов в базу"),
+        ("DELETE_OBJECTS", "удаление объектов из базы"),
+        ("LOCK_OBJECTS", "программная блокировка данных (ЗаблокироватьДанныеДляРедактирования)"),
+        ("UNLOCK_OBJECTS", "снятие программной блокировки данных"),
+        ("CALL_PREPARED", "подготовленный запрос к СУБД"),
+        ("DB_QUERY", "SQL-запрос к СУБД"),
+        ("EXECUTE", "выполнение кода на сервере"),
+        ("RECOMPILE", "перекомпиляция модулей конфигурации"),
+        ("POST_IBCONFIG", "обновление конфигурации информационной базы"),
+        ("GET_OBJECTS", "чтение объектов из базы"),
+        ("TRANSACTION_BEGIN", "начало транзакции"),
+        ("TRANSACTION_COMMIT", "фиксация транзакции"),
+        ("TRANSACTION_ROLLBACK", "откат транзакции"),
+    };
+
+    private static readonly (string Key, string Text)[] Part =
+    {
+        ("SessionDataService", "серверный сервис данных управляемых форм: чтение динамических списков и данных открытых форм"),
+        ("DataCompositionService", "система компоновки данных (СКД): построение динамического списка или отчёта"),
+        ("FileSystemService", "файловые операции платформы на сервере (получение/размещение файлов)"),
+        ("ExternalSessionManagerService", "внешнее управление сеансами (административные подключения)"),
+        ("FulltextSearch", "полнотекстовый поиск"),
+        ("JobScheduler", "планировщик регламентных и фоновых заданий"),
+        ("BackgroundJob", "фоновое задание"),
+        ("Designer", "Конфигуратор"),
+        ("WebServer", "веб-клиент или опубликованный веб-сервис"),
+        ("COM", "внешнее COM-подключение"),
+    };
 }
 
 internal sealed class Record : Dictionary<string, string> { public string Get(string key) => TryGetValue(key, out var x) ? x : ""; }
