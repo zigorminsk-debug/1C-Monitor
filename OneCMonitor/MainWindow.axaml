@@ -64,7 +64,7 @@
       <TabItem Header="Пользователи и сеансы">
         <Grid RowDefinitions="Auto,*" Margin="0,12,0,0">
           <StackPanel Spacing="10">
-            <Border Classes="card"><TextBlock Text="CPU/RAM учитываются Windows для процесса rphost. «CPU пользователя» — оценочная доля среди сеансов процесса. Точный документ и строка кода доступны только через технологический журнал 1С. Расшифровка блокировки (таблицы СУБД, модуль, документ и владелец блокировки) берётся из событий TLOCK/DEADLOCK технологического журнала по номеру соединения RAC." Classes="muted" TextWrapping="Wrap"/></Border>
+            <Border Classes="card"><TextBlock Text="CPU/RAM учитываются Windows для процесса rphost. «CPU пользователя» — оценочная доля среди сеансов процесса. Для выполняемого вызова расшифровываются метод, документ/модуль и таблицы СУБД: документ берётся из контекста технологического журнала, таблицы — из текущего запроса СУБД. Расшифровка блокировки (таблицы СУБД, модуль, документ и владелец блокировки) берётся из событий TLOCK/DEADLOCK технологического журнала по номеру соединения RAC." Classes="muted" TextWrapping="Wrap"/></Border>
             <Grid ColumnDefinitions="*,*,*" ColumnSpacing="10">
               <Border Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="●" Foreground="#34D399" FontSize="22"/><StackPanel><TextBlock Text="АКТИВНЫЕ" Classes="muted"/><TextBlock Text="{Binding ActiveSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
               <Border Grid.Column="1" Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="💤" FontSize="20"/><StackPanel><TextBlock Text="СПЯЩИЕ" Classes="muted"/><TextBlock Text="{Binding SleepingSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
@@ -82,6 +82,7 @@
               <DataGridTextColumn Header="Память вызова RAC" Binding="{Binding SessionMemoryText}" Width="145"/>
               <DataGridTextColumn Header="CPU-время RAC" Binding="{Binding SessionCpuTimeText}" Width="130"/>
               <DataGridTextColumn Header="Текущий вызов" Binding="{Binding CurrentCallText}" Width="120"/>
+              <DataGridTextColumn Header="Выполняется в вызове" Binding="{Binding CurrentCallDetail}" Width="440"/>
               <DataGridTextColumn Header="Вызов СУБД" Binding="{Binding CurrentDbText}" Width="120"/>
               <DataGridTextColumn Header="I/O сеанса" Binding="{Binding IoCurrentText}" Width="180"/>
               <DataGridTextColumn Header="Нагрузка за 5 минут" Binding="{Binding Load5MinText}" Width="390"/>
