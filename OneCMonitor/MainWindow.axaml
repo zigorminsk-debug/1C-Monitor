@@ -64,7 +64,7 @@
       <TabItem Header="Пользователи и сеансы">
         <Grid RowDefinitions="Auto,*" Margin="0,12,0,0">
           <StackPanel Spacing="10">
-            <Border Classes="card"><TextBlock Text="CPU/RAM учитываются Windows для процесса rphost. «CPU пользователя» — оценочная доля среди сеансов процесса. Точный документ и строка кода доступны только через технологический журнал 1С." Classes="muted" TextWrapping="Wrap"/></Border>
+            <Border Classes="card"><TextBlock Text="CPU/RAM учитываются Windows для процесса rphost. «CPU пользователя» — оценочная доля среди сеансов процесса. Точный документ и строка кода доступны только через технологический журнал 1С. Расшифровка блокировки (таблицы СУБД, модуль, документ и владелец блокировки) берётся из событий TLOCK/DEADLOCK технологического журнала по номеру соединения RAC." Classes="muted" TextWrapping="Wrap"/></Border>
             <Grid ColumnDefinitions="*,*,*" ColumnSpacing="10">
               <Border Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="●" Foreground="#34D399" FontSize="22"/><StackPanel><TextBlock Text="АКТИВНЫЕ" Classes="muted"/><TextBlock Text="{Binding ActiveSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
               <Border Grid.Column="1" Classes="card"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="💤" FontSize="20"/><StackPanel><TextBlock Text="СПЯЩИЕ" Classes="muted"/><TextBlock Text="{Binding SleepingSessionCount}" FontSize="22" FontWeight="SemiBold"/></StackPanel></StackPanel></Border>
@@ -96,6 +96,7 @@
               <DataGridTextColumn Header="Последний вызов ТЖ" Binding="{Binding LastCallText}" Width="155"/>
               <DataGridTextColumn Header="Запрос СУБД" Binding="{Binding DbRequest}" Width="300"/>
               <DataGridTextColumn Header="Блокировка" Binding="{Binding Blocked}" Width="190"/>
+              <DataGridTextColumn Header="Расшифровка блокировки" Binding="{Binding BlockedDetails}" Width="460"/>
             </DataGrid.Columns>
           </DataGrid>
         </Grid>
@@ -161,7 +162,7 @@
               <TextBlock Text="Каталог отчётов" VerticalAlignment="Center"/><TextBox Grid.Column="1" Text="{Binding Settings.ReportFolder}"/>
             </Grid>
             <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сформировать отчёт за сегодня" Command="{Binding GenerateDailyReportCommand}"/><TextBlock Text="{Binding AdminActionStatus}" Classes="muted" VerticalAlignment="Center" TextWrapping="Wrap"/></StackPanel>
-            <TextBlock Text="Отчёт содержит почасовой рост CPU, RAM, диска, сети, количества сеансов и таблицу пользователей, генерировавших нагрузку. Для полного дня программа должна оставаться запущенной." Classes="muted" TextWrapping="Wrap"/>
+            <TextBlock Text="Отчёт содержит почасовой рост CPU, RAM, диска, сети, количества сеансов, таблицу пользователей, генерировавших нагрузку, и зафиксированные блокировки с расшифровкой: какие таблицы, модули и документы блокировались и кто удерживал блокировку. Для полного дня программа должна оставаться запущенной." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Плавный автоматический вывод rphost" FontSize="17" FontWeight="SemiBold"/>

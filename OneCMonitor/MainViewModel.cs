@@ -43,6 +43,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly List<HistoryRow> _history = new();
     private readonly List<ServerHistoryRow> _serverHistory = new();
     private readonly Dictionary<string, DailyUserStat> _dailyUsers = new();
+    private readonly Dictionary<string, LockEvent> _dailyLocks = new();
     private readonly Dictionary<int, DateTime> _memoryOverSince = new();
     private readonly Dictionary<int, DrainState> _drainingProcesses = new();
     private readonly Dictionary<string, DateTime> _lastAlertEmission = new(StringComparer.OrdinalIgnoreCase);
@@ -338,7 +339,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 var deviations = new List<string>();
                 if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert) deviations.Add($"диск {disk.UsagePercent:0}% ≥ порога {Settings.DiskAlert:0}% (ср. очередь {DiskQueueLabel(disk)})");
                 foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"PID {p.Pid}: {p.Diagnosis}");
-                foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}, PID {s.Pid}");
+                foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}, PID {s.Pid}{(string.IsNullOrWhiteSpace(s.BlockedTables) ? "" : $", таблицы: {Trunc(s.BlockedTables, 60)}")}");
                 AlertCount = deviations.Count;
                 TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
                 DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
@@ -434,6 +435,20 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             else if (!string.IsNullOrWhiteSpace(s.Operation)) stat.LastContext = s.Operation;
         }
         foreach (var old in _dailyUsers.Where(x => x.Value.Date < at.Date.AddDays(-2)).Select(x => x.Key).ToList()) _dailyUsers.Remove(old);
+        foreach (var s in sessions.Where(x => x.IsBlockedNow))
+        {
+            var lockKey = $"{at:yyyyMMdd}|{s.InfoBase}|{s.UserName}|{s.Pid}|{s.BlockedKindText}|{s.BlockedTables}|{s.BlockedHolder}";
+            if (!_dailyLocks.TryGetValue(lockKey, out var ev))
+                _dailyLocks[lockKey] = ev = new LockEvent(at, s.UserName, s.InfoBase, s.Pid, s.BlockedKindText, s.BlockedTables, s.BlockedHolder);
+            ev.LastAt = at; ev.Count++;
+            if (!string.IsNullOrWhiteSpace(s.BlockedTables)) ev.Tables = s.BlockedTables;
+            if (!string.IsNullOrWhiteSpace(s.BlockedHolder)) ev.Holder = s.BlockedHolder;
+            if (!string.IsNullOrWhiteSpace(s.BlockedContext)) ev.Context = s.BlockedContext;
+            else if (!string.IsNullOrWhiteSpace(s.TechContext)) ev.Context = s.TechContext;
+            var request = CombineRequest(s.Operation, s.DbRequest);
+            if (request.Length > 0) ev.Request = request;
+        }
+        foreach (var old in _dailyLocks.Where(x => x.Value.FirstAt < at.Date.AddDays(-2)).Select(x => x.Key).ToList()) _dailyLocks.Remove(old);
     }
 
     private void CheckAutomaticDailyReport(DateTime now)
@@ -450,6 +465,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         {
             var points = _serverHistory.Where(x => x.At.Date == date.Date).ToList();
             var users = _dailyUsers.Values.Where(x => x.Date == date.Date).OrderByDescending(x => x.MaxProcessCpu).ThenByDescending(x => x.MaxDuration5Min).ToList();
+            var locks = _dailyLocks.Values.Where(x => x.FirstAt.Date == date.Date).OrderBy(x => x.FirstAt).ToList();
             if (points.Count == 0) { AdminActionStatus = "Нет накопленных данных для суточного отчёта"; return; }
             var folder = string.IsNullOrWhiteSpace(Settings.ReportFolder) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "1CServerMonitor", "Reports") : Settings.ReportFolder;
             Directory.CreateDirectory(folder); var file = Path.Combine(folder, $"1C-daily-{Environment.MachineName}-{date:yyyy-MM-dd}.html");
@@ -457,7 +473,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var sb = new StringBuilder(200000);
             sb.Append("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Суточный отчёт 1С</title><style>body{font:14px Segoe UI,Arial;background:#f4f7fb;color:#172033;margin:0;padding:24px}h1,h2{margin:0 0 12px}.sub{color:#64748b;margin-bottom:18px}.card,section{background:#fff;border:1px solid #dbe3ef;border-radius:10px;padding:16px;margin:12px 0;overflow-x:auto}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.cards .card{margin:0}.v{font-size:22px;font-weight:700}table{border-collapse:collapse;width:100%;table-layout:auto}th,td{padding:8px 10px;border-bottom:1px solid #dbe3ef;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}th{background:#eef3fa;white-space:nowrap}.bad{color:#b91c1c;font-weight:700}.wide{min-width:260px}@media print{@page{size:A4 landscape;margin:8mm}body{background:#fff;padding:0}}</style></head><body>");
             sb.Append($"<h1>{H(Environment.MachineName)} — нагрузка сервера 1С за {date:dd.MM.yyyy}</h1><div class=\"sub\">Покрытие {points.First().At:HH:mm:ss}–{points.Last().At:HH:mm:ss}, измерений: {points.Count} · Разработчик: Zakharevich Igor</div><div class=\"cards\">");
-            DailyCard("Максимальный CPU", $"{points.Max(x => x.Cpu):0.0}%"); DailyCard("Максимальная RAM", FormatMb(points.Max(x => x.RamMb))); DailyCard("Максимум диска", $"{points.Max(x => x.DiskUsage):0.0}%"); DailyCard("Очередь диска", $"{points.Max(x => x.DiskQueue):0.0}"); DailyCard("Сеть приём", FormatRate(points.Max(x => x.NetIn))); DailyCard("Сеть отправка", FormatRate(points.Max(x => x.NetOut))); DailyCard("Максимум сеансов", points.Max(x => x.Sessions).ToString());
+            DailyCard("Максимальный CPU", $"{points.Max(x => x.Cpu):0.0}%"); DailyCard("Максимальная RAM", FormatMb(points.Max(x => x.RamMb))); DailyCard("Максимум диска", $"{points.Max(x => x.DiskUsage):0.0}%"); DailyCard("Очередь диска", $"{points.Max(x => x.DiskQueue):0.0}"); DailyCard("Сеть приём", FormatRate(points.Max(x => x.NetIn))); DailyCard("Сеть отправка", FormatRate(points.Max(x => x.NetOut))); DailyCard("Максимум сеансов", points.Max(x => x.Sessions).ToString()); DailyCard("Блокировки", locks.Count > 0 ? $"{locks.Count} событий, фиксаций {locks.Sum(x => x.Count)}" : "не зафиксированы");
             var racDescription = !string.IsNullOrWhiteSpace(_lastRacPath) && File.Exists(_lastRacPath) ? $"{FileVersionInfo.GetVersionInfo(_lastRacPath).FileVersion} · {ArchitectureLabel(_lastRacPath)} · {_lastRacPath}" : "не подключён";
             sb.Append("</div><section><h2>Описание и параметры сервера</h2><table><tbody>");
             ServerParam("Имя сервера", Environment.MachineName); ServerParam("Операционная система", RuntimeInformation.OSDescription.Trim()); ServerParam("Архитектура ОС", RuntimeInformation.OSArchitecture.ToString());
@@ -470,7 +486,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             foreach (var h in hourly) sb.Append($"<tr><td>{h.Hour:00}:00</td><td>{h.AvgCpu:0.0}%</td><td>{h.MaxCpu:0.0}%</td><td>{FormatMb(h.AvgRam)}</td><td>{FormatMb(h.MaxRam)}</td><td>{h.AvgDisk:0.0}%</td><td class=\"{(h.MaxDisk >= 90 ? "bad" : "")}\">{h.MaxDisk:0.0}%</td><td>{FormatRate(h.MaxRead)}</td><td>{FormatRate(h.MaxWrite)}</td><td>{h.MaxQueue:0.0}</td><td>{FormatRate(h.MaxNetIn)}</td><td>{FormatRate(h.MaxNetOut)}</td><td>{h.MaxSessions}</td></tr>");
             sb.Append("</tbody></table></section><section><h2>Кто генерировал нагрузку</h2><table><thead><tr><th>Пользователь</th><th>База</th><th>Компьютеры</th><th>PID</th><th>CPU rphost макс.</th><th>RAM rphost макс.</th><th>CPU-время 5 мин</th><th>Вызовы 5 мин</th><th>Время 5 мин</th><th>СУБД 5 мин</th><th>ΔRAM 5 мин</th><th class=\"wide\">Документ/контекст</th></tr></thead><tbody>");
             foreach (var u in users) sb.Append($"<tr><td>{H(u.UserName)}</td><td>{H(u.InfoBase)}</td><td>{H(string.Join(", ", u.Hosts))}</td><td>{H(string.Join(", ", u.Pids))}</td><td>{u.MaxProcessCpu:0.0}%</td><td>{FormatMb(u.MaxProcessMemoryMb)}</td><td>{u.MaxCpu5Min:0} мс</td><td>{u.MaxCalls5Min}</td><td>{u.MaxDuration5Min / 1000:0.0} с</td><td>{u.MaxDbDuration5Min / 1000:0.0} с</td><td>{u.MaxMemory5MinMb:0.0} МБ</td><td class=\"wide\">{H(u.LastContext)}</td></tr>");
-            sb.Append("</tbody></table></section><section><b>Контакты:</b> Zakharevich Igor · <a href=\"https://csl.by\">csl.by</a> · <a href=\"mailto:info@csl.by\">info@csl.by</a> · +375 29 337 14 12</section></body></html>");
+            sb.Append("</tbody></table></section>");
+            sb.Append("<section><h2>Зафиксированные блокировки — какие таблицы, модули и документы блокировались</h2>");
+            sb.Append("<p class=\"sub\">Флаги блокировок считываются из RAC (blocked-by-dbms, blocked-by-ls) при каждом опросе. Заблокированные таблицы СУБД, модуль и документ извлекаются из событий TLOCK и DEADLOCK технологического журнала; соединение, удерживающее блокировку, определяется по номеру соединения RAC. Для полной расшифровки в logcfg.xml должны быть включены классы событий DBLOCKS и DEADLOCK, а в настройках программы указан каталог технологического журнала.</p>");
+            AppendLocksTableHtml(sb, BuildLockRows(date), "За сутки блокировки не зафиксированы");
+            sb.Append("</section><section><b>Контакты:</b> Zakharevich Igor · <a href=\"https://csl.by\">csl.by</a> · <a href=\"mailto:info@csl.by\">info@csl.by</a> · +375 29 337 14 12</section></body></html>");
             File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true)); AdminActionStatus = (automatic ? "Автоотчёт создан: " : "Отчёт создан: ") + file; Log(AdminActionStatus);
             if (!automatic && OperatingSystem.IsWindows()) Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
             void DailyCard(string label, string value) => sb.Append($"<div class=\"card\"><div>{H(label)}</div><div class=\"v\">{H(value)}</div></div>");
@@ -635,8 +655,13 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             if (DateTime.UtcNow - _techLogFileCacheAt >= TimeSpan.FromMinutes(10) || _cachedTechLogFiles.Count == 0)
             {
                 _cachedTechLogFiles.Clear();
-                _cachedTechLogFiles.AddRange(Directory.EnumerateFiles(path, "*.log", SearchOption.AllDirectories)
-                    .Select(x => new FileInfo(x)).OrderByDescending(x => x.LastWriteTimeUtc).Take(8).Select(x => x.FullName));
+                var files = Directory.EnumerateFiles(path, "*.log", SearchOption.AllDirectories)
+                    .Select(x => new FileInfo(x)).OrderByDescending(x => x.LastWriteTimeUtc).ToList();
+                // Кроме 8 самых свежих файлов берём свежие файлы блокировок (dblocks/deadlock/tlocks),
+                // иначе события TLOCK могут не попасть в выборку при активном журнале вызовов.
+                _cachedTechLogFiles.AddRange(files.Take(8)
+                    .Concat(files.Where(x => Path.GetFileName(x.FullName).Contains("lock", StringComparison.OrdinalIgnoreCase)).Take(4))
+                    .Select(x => x.FullName).Distinct(StringComparer.OrdinalIgnoreCase));
                 _techLogFileCacheAt = DateTime.UtcNow;
             }
             var lines = new List<string>();
@@ -646,7 +671,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 if (fs.Length > 131072) fs.Seek(-131072, SeekOrigin.End);
                 using var reader = new StreamReader(fs, Encoding.UTF8, true);
                 if (fs.Position > 0) reader.ReadLine();
-                while (reader.ReadLine() is { } line) if (line.Contains("Context=", StringComparison.OrdinalIgnoreCase)) lines.Add(line);
+                while (reader.ReadLine() is { } line)
+                    if (line.Contains("Context=", StringComparison.OrdinalIgnoreCase) || line.Contains(",TLOCK,", StringComparison.OrdinalIgnoreCase) || line.Contains(",DEADLOCK,", StringComparison.OrdinalIgnoreCase)) lines.Add(line);
             }
             foreach (var session in sessions)
             {
@@ -659,8 +685,97 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 var duration = Regex.Match(line, @"^\d{2}:\d{2}\.\d+-(\d+)");
                 if (duration.Success && double.TryParse(duration.Groups[1].Value, out var microseconds)) session.LastCallMs = microseconds / 1000d;
             }
+            ApplyLockDecoding(sessions, lines);
         }
         catch (Exception ex) { Log("Технологический журнал: " + ex.Message); }
+    }
+
+    // Расшифровка блокировок: события TLOCK/DEADLOCK технологического журнала содержат
+    // имя заблокированной таблицы СУБД (Locks), модуль и документ (Context) и номер
+    // соединения, удерживающего блокировку (Connection). Сеанс сопоставляется по номеру
+    // соединения RAC из списка WaitConnections / DeadlockConnectionIntersections.
+    private void ApplyLockDecoding(List<SessionRow> sessions, List<string> lines)
+    {
+        var lockLines = lines.Where(x => x.Contains(",TLOCK,", StringComparison.OrdinalIgnoreCase) || x.Contains(",DEADLOCK,", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (lockLines.Count == 0) return;
+        foreach (var session in sessions.Where(x => x.IsBlockedNow))
+        {
+            var line = lockLines.LastOrDefault(x => LockLineMatchesSession(x, session));
+            if (line == null) continue;
+            var isDeadlock = line.Contains(",DEADLOCK,", StringComparison.OrdinalIgnoreCase);
+            var time = Regex.Match(line, @"^(\d{2}:\d{2}\.\d+)");
+            session.BlockedEvent = (isDeadlock ? "DEADLOCK" : "TLOCK") + (time.Success ? $" в {time.Groups[1].Value}" : "");
+            session.BlockedTables = DescribeLockedTables(TechField(line, "Locks"));
+            var context = Regex.Match(line, "Context\\s*=\\s*(?:'([^']*)'|\\\"([^\\\"]*)\\\"|([^,\\r\\n]+))", RegexOptions.IgnoreCase);
+            if (context.Success) session.BlockedContext = context.Groups.Cast<Group>().Skip(1).FirstOrDefault(g => g.Success)?.Value.Trim() ?? "";
+            var holderConn = Int(TechField(line, "Connection"));
+            if (holderConn > 0)
+            {
+                var holder = sessions.FirstOrDefault(x => x.ConnectionId == holderConn);
+                session.BlockedHolder = holder != null
+                    ? $"соединение {holderConn}: {holder.UserName}, сеанс {holder.SessionNumber}, база {holder.InfoBase}, компьютер {holder.Host}, PID {holder.Pid}"
+                    : $"соединение {holderConn} (владелец не найден среди текущих сеансов RAC)";
+            }
+        }
+    }
+
+    private static bool LockLineMatchesSession(string line, SessionRow session)
+    {
+        if (session.ConnectionId <= 0) return false;
+        var id = session.ConnectionId.ToString(CultureInfo.InvariantCulture);
+        foreach (var field in new[] { "WaitConnections", "WaitConnection", "DeadlockConnectionIntersections" })
+        {
+            var value = TechField(line, field);
+            if (value.Length == 0) continue;
+            foreach (Match m in Regex.Matches(value, @"\d+"))
+                if (m.Value == id) return true;
+        }
+        return false;
+    }
+
+    private static string TechField(string line, string name)
+    {
+        var quoted = Regex.Match(line, $@"(?:^|[,\s]){name}\s*=\s*'([^']*)'", RegexOptions.IgnoreCase);
+        if (quoted.Success) return quoted.Groups[1].Value.Trim();
+        var plain = Regex.Match(line, $@"(?:^|[,\s]){name}\s*=\s*([^,\r\n']*)", RegexOptions.IgnoreCase);
+        return plain.Success ? plain.Groups[1].Value.Trim() : "";
+    }
+
+    private static string DescribeLockedTables(string locks)
+    {
+        if (string.IsNullOrWhiteSpace(locks)) return "";
+        var names = locks.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToList();
+        var text = string.Join(", ", names.Select(x => { var kind = DbTableKind(x); return kind.Length > 0 ? $"{x} ({kind})" : x; }));
+        return names.Count >= 12 ? text + ", …" : text;
+    }
+
+    // Физические таблицы СУБД платформа 1С именует по шаблону _<ТипОбъекта><Номер>.
+    // Точное имя объекта конфигурации хранится в схеме БД и здесь недоступно,
+    // поэтому по префиксу определяется хотя бы тип метаданных.
+    private static string DbTableKind(string table)
+    {
+        var t = table.ToUpperInvariant().Replace("_", "");
+        if (t.Contains("CHNGR")) return "регистрация изменений, синхронизация данных";
+        if (t.Contains("DOCUMENTJOURNAL")) return "журнал документов";
+        if (t.Contains("DOCUMENT")) return "таблица документов";
+        if (t.Contains("REFERENCE")) return "таблица справочника";
+        if (t.Contains("INFOR")) return "регистр сведений";
+        if (t.Contains("ACCUMR")) return "регистр накопления";
+        if (t.Contains("ACCOUNTINGR")) return "регистр бухгалтерии";
+        if (t.Contains("CALCR")) return "регистр расчёта";
+        if (t.Contains("CHARTOFCALCULATIONTYPES")) return "план видов расчёта";
+        if (t.Contains("CHARTOFCHARACTERISTICS")) return "план видов характеристик";
+        if (t.Contains("CHARTOFACCOUNTS")) return "план счетов";
+        if (t.Contains("BUSINESSPROCESS")) return "бизнес-процесс";
+        if (t.Contains("TASK")) return "таблица задач";
+        if (t.Contains("ENUM")) return "таблица перечисления";
+        if (t.Contains("CONST")) return "таблица констант";
+        if (t.Contains("EXTERNALDATASOURCE")) return "внешний источник данных";
+        if (t.Contains("FTS")) return "полнотекстовый поиск";
+        if (t.Contains("DBSCHEMA")) return "служебная таблица схемы БД";
+        if (t.Contains("CONFIG")) return "служебная таблица конфигурации";
+        return "";
     }
 
     private List<ProcessRow> SampleLocalProcesses()
@@ -720,7 +835,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert)
             candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал, чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
         foreach (var p in proc.Where(x => x.Risk >= 50)) candidates.Add(($"pid:{p.Pid}", new(now, p.Risk >= 80 ? "КРИТИЧНО" : "ВНИМАНИЕ", $"PID {p.Pid}", p.Diagnosis + (string.IsNullOrEmpty(p.Users) ? "" : $"; пользователи: {p.Users}"))));
-        foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {s.Blocked}")));
+        foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {s.Blocked}{s.BlockedAlertSuffix}")));
 
         var repeatAfter = TimeSpan.FromSeconds(Math.Max(60, (double)Settings.AlertRepeatSeconds));
         var add = new List<AlertRow>();
@@ -835,7 +950,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var sleeping = IsTrue(s.Get("hibernate"));
             var operation = Empty(s.Get("current-service-call"), Empty(s.Get("current-service-name"), link?.Operation ?? ""));
             var dbRequest = Empty(s.Get("current-dbms-request"), link?.DbRequest ?? "");
-            result.Sessions.Add(new SessionRow { SessionUuid = N(s.Get("session")), UserName = Empty(s.Get("user-name"), "<не указан>"), InfoBase = Empty(db, N(s.Get("infobase"))), AppId = s.Get("app-id"), Host = s.Get("host"), Pid = pid, SessionNumber = Empty(s.Get("session-id"), Empty(s.Get("session-number"), s.Get("session"))), StartedAt = s.Get("started-at"), LastActiveAt = s.Get("last-active-at"), IsSleeping = sleeping, MemoryCurrentMb = Num(s.Get("memory-current")) / 1048576d, MemoryLast5MinMb = Num(s.Get("memory-last-5min")) / 1048576d, CpuTimeCurrent = Num(s.Get("cpu-time-current")), CpuTimeLast5Min = Num(s.Get("cpu-time-last-5min")), DurationCurrentMs = Num(s.Get("duration-current")), DurationDbCurrentMs = Num(s.Get("duration-current-dbms")), DurationLast5MinMs = Num(s.Get("duration-last-5min")), DurationDbLast5MinMs = Num(s.Get("duration-last-5min-dbms")), CallsLast5Min = Int(s.Get("calls-last-5min")), BytesLast5Min = Num(s.Get("bytes-last-5min")), DbBytesLast5Min = Num(s.Get("dbms-bytes-last-5min")), ReadCurrent = Num(s.Get("read-current")), WriteCurrent = Num(s.Get("write-current")), ReadLast5Min = Num(s.Get("read-last-5min")), WriteLast5Min = Num(s.Get("write-last-5min")), Operation = operation, DbRequest = dbRequest, Blocked = IsTrue(b1) || IsTrue(b2) ? $"да (DBMS={b1}, LS={b2})" : "нет" });
+            result.Sessions.Add(new SessionRow { SessionUuid = N(s.Get("session")), UserName = Empty(s.Get("user-name"), "<не указан>"), InfoBase = Empty(db, N(s.Get("infobase"))), AppId = s.Get("app-id"), Host = s.Get("host"), Pid = pid, SessionNumber = Empty(s.Get("session-id"), Empty(s.Get("session-number"), s.Get("session"))), StartedAt = s.Get("started-at"), LastActiveAt = s.Get("last-active-at"), IsSleeping = sleeping, MemoryCurrentMb = Num(s.Get("memory-current")) / 1048576d, MemoryLast5MinMb = Num(s.Get("memory-last-5min")) / 1048576d, CpuTimeCurrent = Num(s.Get("cpu-time-current")), CpuTimeLast5Min = Num(s.Get("cpu-time-last-5min")), DurationCurrentMs = Num(s.Get("duration-current")), DurationDbCurrentMs = Num(s.Get("duration-current-dbms")), DurationLast5MinMs = Num(s.Get("duration-last-5min")), DurationDbLast5MinMs = Num(s.Get("duration-last-5min-dbms")), CallsLast5Min = Int(s.Get("calls-last-5min")), BytesLast5Min = Num(s.Get("bytes-last-5min")), DbBytesLast5Min = Num(s.Get("dbms-bytes-last-5min")), ReadCurrent = Num(s.Get("read-current")), WriteCurrent = Num(s.Get("write-current")), ReadLast5Min = Num(s.Get("read-last-5min")), WriteLast5Min = Num(s.Get("write-last-5min")), Operation = operation, DbRequest = dbRequest, ConnectionId = link?.ConnId ?? Int(s.Get("conn-id")), BlockedByDbms = IsTrue(b1), BlockedByLs = IsTrue(b2), Blocked = IsTrue(b1) || IsTrue(b2) ? $"да (DBMS={b1}, LS={b2})" : "нет" });
         }
         if (result.Sessions.Count == 0 || result.Sessions.Any(x => x.Pid <= 0))
         {
@@ -1166,16 +1281,27 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             sb.Append($"<h1>Отчёт мониторинга сервера 1С</h1><div class=\"sub\">Сформирован {DateTime.Now:dd.MM.yyyy HH:mm:ss} · {H(Status)} · Разработчик: Zakharevich Igor</div>");
             sb.Append("<div class=\"cards\">");
             Card("Процессы rphost", ProcessCount.ToString()); Card("CPU rphost", TotalCpuText); Card("Память rphost", TotalMemoryText);
-            Card("Активные сеансы", ActiveSessionCount.ToString()); Card("Спящие сеансы", SleepingSessionCount.ToString()); Card("Тревоги", AlertCount.ToString());
+            Card("Активные сеансы", ActiveSessionCount.ToString()); Card("Спящие сеансы", SleepingSessionCount.ToString()); Card("Тревоги", AlertCount.ToString()); Card("Сеансы с блокировками", Sessions.Count(x => x.IsBlockedNow).ToString());
             Card("Загрузка диска", DiskUsageText); Card("Ввод-вывод", DiskIoText); Card("Очередь диска", DiskQueueText); Card("Сеть", NetworkLoadText);
             sb.Append("</div>");
             sb.Append($"<section class=\"section\"><h2>Сервер и накопители</h2><p>{H(ServerHeaderDetails).Replace("\n", "<br>")}</p><p><strong>Оборудование:</strong> {H(ServerHardwareText)}</p><p><strong>Сеть:</strong> {H(NetworkLoadText)}</p></section>");
             sb.Append("<section class=\"section\"><h2>Рабочие процессы</h2><table><thead><tr><th>Риск</th><th>PID</th><th>Состояние процесса</th><th>CPU</th><th>RAM</th><th>Сеансы</th><th>Средний вызов</th><th>Средний запрос БД</th><th class=\"wide\">Пользователи</th><th class=\"wide\">Диагноз</th></tr></thead><tbody>");
             foreach (var p in Processes) sb.Append($"<tr><td class=\"{RiskCss(p.Risk)} nowrap\">{p.Risk}</td><td class=\"nowrap\">{p.Pid}</td><td>{H(p.DrainStatus)}</td><td class=\"nowrap\">{H(p.CpuText)}</td><td class=\"nowrap\">{H(p.MemoryText)}</td><td>{p.SessionCount}</td><td class=\"nowrap\">{H(p.AvgCallText)}</td><td class=\"nowrap\">{H(p.AvgDbText)}</td><td class=\"wide\">{H(p.Users)}</td><td class=\"wide\">{H(p.Diagnosis)}</td></tr>");
             sb.Append("</tbody></table></section>");
-            sb.Append("<section class=\"section\"><h2>Пользователи и сеансы</h2><div class=\"note\">CPU и RAM измеряются на уровне rphost. CPU пользователя — оценочная доля. Контекст документа берётся из технологического журнала.</div><table><thead><tr><th>Состояние</th><th class=\"medium\">Пользователь</th><th>База</th><th>Приложение</th><th class=\"medium\">Компьютер</th><th>PID</th><th>Память вызова RAC</th><th>CPU-время RAC</th><th>Текущий вызов</th><th>Вызов СУБД</th><th>I/O сеанса</th><th class=\"wide\">Нагрузка за 5 минут</th><th class=\"wide\">I/O за 5 минут</th><th>CPU rphost</th><th>RAM rphost</th><th>CPU пользователя*</th><th class=\"nowrap\">Начало</th><th class=\"nowrap\">Последняя активность</th><th class=\"wide\">Метод/операция RAC</th><th class=\"wide\">Документ/контекст ТЖ</th><th>Время вызова ТЖ</th><th class=\"wide\">Запрос СУБД</th><th>Блокировка</th></tr></thead><tbody>");
-            foreach (var s in Sessions) sb.Append($"<tr><td class=\"{(s.IsSleeping ? "" : "ok")} nowrap\">{H(s.SessionState)}</td><td class=\"medium\">{H(s.UserName)}</td><td>{H(s.InfoBase)}</td><td>{H(s.AppId)}</td><td class=\"medium\">{H(s.Host)}</td><td class=\"nowrap\">{(s.Pid > 0 ? s.Pid.ToString() : "—")}</td><td class=\"nowrap\">{H(s.SessionMemoryText)}</td><td class=\"nowrap\">{H(s.SessionCpuTimeText)}</td><td class=\"nowrap\">{H(s.CurrentCallText)}</td><td class=\"nowrap\">{H(s.CurrentDbText)}</td><td class=\"nowrap\">{H(s.IoCurrentText)}</td><td class=\"wide\">{H(s.Load5MinText)}</td><td class=\"wide\">{H(s.Io5MinText)}</td><td class=\"nowrap\">{H(s.ProcessCpuText)}</td><td class=\"nowrap\">{H(s.ProcessMemoryText)}</td><td class=\"nowrap\">{H(s.EstimatedCpuText)}</td><td class=\"nowrap\">{H(s.StartedAt)}</td><td class=\"nowrap\">{H(s.LastActiveAt)}</td><td class=\"wide\">{H(s.Operation)}</td><td class=\"wide\">{H(s.TechContext)}</td><td class=\"nowrap\">{H(s.LastCallText)}</td><td class=\"wide\">{H(s.DbRequest)}</td><td class=\"{(s.Blocked == "нет" ? "" : "critical")}\">{H(s.Blocked)}</td></tr>");
+            sb.Append("<section class=\"section\"><h2>Пользователи и сеансы</h2><div class=\"note\">CPU и RAM измеряются на уровне rphost. CPU пользователя — оценочная доля. Контекст документа и расшифровка блокировок (таблицы, модули, документы, владелец блокировки) берутся из технологического журнала 1С, события TLOCK/DEADLOCK.</div><table><thead><tr><th>Состояние</th><th class=\"medium\">Пользователь</th><th>База</th><th>Приложение</th><th class=\"medium\">Компьютер</th><th>PID</th><th>Память вызова RAC</th><th>CPU-время RAC</th><th>Текущий вызов</th><th>Вызов СУБД</th><th>I/O сеанса</th><th class=\"wide\">Нагрузка за 5 минут</th><th class=\"wide\">I/O за 5 минут</th><th>CPU rphost</th><th>RAM rphost</th><th>CPU пользователя*</th><th class=\"nowrap\">Начало</th><th class=\"nowrap\">Последняя активность</th><th class=\"wide\">Метод/операция RAC</th><th class=\"wide\">Документ/контекст ТЖ</th><th>Время вызова ТЖ</th><th class=\"wide\">Запрос СУБД</th><th>Блокировка</th><th class=\"wide\">Расшифровка блокировки</th></tr></thead><tbody>");
+            foreach (var s in Sessions) sb.Append($"<tr><td class=\"{(s.IsSleeping ? "" : "ok")} nowrap\">{H(s.SessionState)}</td><td class=\"medium\">{H(s.UserName)}</td><td>{H(s.InfoBase)}</td><td>{H(s.AppId)}</td><td class=\"medium\">{H(s.Host)}</td><td class=\"nowrap\">{(s.Pid > 0 ? s.Pid.ToString() : "—")}</td><td class=\"nowrap\">{H(s.SessionMemoryText)}</td><td class=\"nowrap\">{H(s.SessionCpuTimeText)}</td><td class=\"nowrap\">{H(s.CurrentCallText)}</td><td class=\"nowrap\">{H(s.CurrentDbText)}</td><td class=\"nowrap\">{H(s.IoCurrentText)}</td><td class=\"wide\">{H(s.Load5MinText)}</td><td class=\"wide\">{H(s.Io5MinText)}</td><td class=\"nowrap\">{H(s.ProcessCpuText)}</td><td class=\"nowrap\">{H(s.ProcessMemoryText)}</td><td class=\"nowrap\">{H(s.EstimatedCpuText)}</td><td class=\"nowrap\">{H(s.StartedAt)}</td><td class=\"nowrap\">{H(s.LastActiveAt)}</td><td class=\"wide\">{H(s.Operation)}</td><td class=\"wide\">{H(s.TechContext)}</td><td class=\"nowrap\">{H(s.LastCallText)}</td><td class=\"wide\">{H(s.DbRequest)}</td><td class=\"{(s.Blocked == "нет" ? "" : "critical")}\">{H(s.Blocked)}</td><td class=\"wide\">{H(s.BlockedDetails)}</td></tr>");
             sb.Append("</tbody></table></section>");
+            var currentLocks = Sessions.Where(x => x.IsBlockedNow)
+                .Select(x => new LockReportRow("на момент отчёта", x.UserName, x.InfoBase, x.Pid, x.BlockedKindText,
+                    Empty(x.BlockedTables, x.BlockedByDbms ? "нет данных ТЖ (нужны классы DBLOCKS/DEADLOCK)" : "не применимо для LS"),
+                    Empty(Empty(x.BlockedContext, x.TechContext), "—"), Empty(x.BlockedHolder, "—"), Empty(CombineRequest(x.Operation, x.DbRequest), "—"), 0))
+                .ToList();
+            sb.Append("<section class=\"section\"><h2>Зафиксированные блокировки — какие таблицы, модули и документы блокируются</h2><div class=\"note\">Флаги блокировок считываются из RAC (blocked-by-dbms, blocked-by-ls). Заблокированные таблицы СУБД, модуль и документ извлекаются из событий TLOCK и DEADLOCK технологического журнала; удерживающее блокировку соединение определяется по номеру соединения RAC и сопоставляется с сеансом владельца. Для полной расшифровки в logcfg.xml должны быть включены классы событий DBLOCKS и DEADLOCK, а в настройках программы указан каталог технологического журнала.</div>");
+            sb.Append("<h3>Заблокированные сеансы сейчас</h3>");
+            AppendLocksTableHtml(sb, currentLocks, "На момент формирования отчёта заблокированных сеансов нет");
+            sb.Append("<h3>Фиксации блокировок за сегодня</h3>");
+            AppendLocksTableHtml(sb, BuildLockRows(null), "За сегодня фиксации блокировок не накоплены");
+            sb.Append("</section>");
             sb.Append("<section class=\"section\"><h2>Тревоги</h2><table><thead><tr><th class=\"nowrap\">Время</th><th>Уровень</th><th>Источник</th><th class=\"wide\">Сообщение</th></tr></thead><tbody>");
             foreach (var a in Alerts) sb.Append($"<tr><td class=\"nowrap\">{H(a.TimeText)}</td><td class=\"critical\">{H(a.Severity)}</td><td>{H(a.Source)}</td><td class=\"wide\">{H(a.Message)}</td></tr>");
             sb.Append("</tbody></table></section>");
@@ -1192,6 +1318,32 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     }
 
     private static string H(string? value) => System.Net.WebUtility.HtmlEncode(value ?? "");
+    private static string Trunc(string value, int max) => string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max] + "…";
+    private static string CombineRequest(string operation, string dbRequest)
+    {
+        if (string.IsNullOrWhiteSpace(operation)) return Trunc(dbRequest, 220);
+        if (string.IsNullOrWhiteSpace(dbRequest)) return Trunc(operation, 220);
+        return Trunc(operation + " → " + dbRequest, 220);
+    }
+
+    // Общая таблица расшифровки блокировок для суточного и оперативного HTML-отчётов.
+    private void AppendLocksTableHtml(StringBuilder sb, List<LockReportRow> rows, string emptyText)
+    {
+        sb.Append("<table><thead><tr><th class=\"nowrap\">Время</th><th>Пользователь</th><th>База</th><th>PID</th><th>Тип</th><th class=\"wide\">Заблокированные таблицы</th><th class=\"wide\">Модуль / документ</th><th class=\"wide\">Кто удерживает блокировку</th><th class=\"wide\">Операция и запрос СУБД</th><th>Фиксаций</th></tr></thead><tbody>");
+        if (rows.Count == 0) sb.Append($"<tr><td colspan=\"10\">{H(emptyText)}</td></tr>");
+        foreach (var r in rows)
+            sb.Append($"<tr><td class=\"nowrap\">{H(r.Time)}</td><td>{H(r.UserName)}</td><td>{H(r.InfoBase)}</td><td class=\"nowrap\">{r.Pid}</td><td class=\"nowrap\" style=\"color:#b91c1c;font-weight:700\">{H(r.Kind)}</td><td class=\"wide\">{H(r.Tables)}</td><td class=\"wide\">{H(r.Context)}</td><td class=\"wide\">{H(r.Holder)}</td><td class=\"wide\">{H(r.Request)}</td><td class=\"nowrap\">{(r.Count > 0 ? r.Count.ToString() : "—")}</td></tr>");
+        sb.Append("</tbody></table>");
+    }
+
+    private List<LockReportRow> BuildLockRows(DateTime? date)
+    {
+        var events = date.HasValue
+            ? _dailyLocks.Values.Where(x => x.FirstAt.Date == date.Value.Date || x.LastAt.Date == date.Value.Date).OrderBy(x => x.FirstAt).ToList()
+            : _dailyLocks.Values.Where(x => x.LastAt.Date == DateTime.Today).OrderBy(x => x.FirstAt).ToList();
+        return events.Select(x => new LockReportRow($"{x.FirstAt:HH:mm:ss}–{x.LastAt:HH:mm:ss}", x.UserName, x.InfoBase, x.Pid, x.Kind,
+            Empty(x.Tables, "нет данных ТЖ (нужны классы DBLOCKS/DEADLOCK)"), Empty(x.Context, "—"), Empty(x.Holder, "—"), Empty(x.Request, "—"), x.Count)).ToList();
+    }
     private static string RiskCss(int risk) => risk >= 80 ? "critical" : risk >= 50 ? "warn" : risk >= 20 ? "warn" : "ok";
 
     private void LogOnce(string key, string text, TimeSpan repeatAfter)
@@ -1248,6 +1400,18 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         public double MaxDuration5Min { get; set; } public double MaxDbDuration5Min { get; set; } public int MaxCalls5Min { get; set; } public double MaxMemory5MinMb { get; set; }
         public string LastContext { get; set; } = "";
     }
+
+    // Одна накопленная фиксация блокировки: одинаковые пользователь, база, PID, тип,
+    // таблицы и владелец объединяются, обновляются время и счётчик повторов.
+    private sealed class LockEvent
+    {
+        public LockEvent(DateTime at, string userName, string infoBase, int pid, string kind, string tables, string holder)
+        { FirstAt = at; LastAt = at; UserName = userName; InfoBase = infoBase; Pid = pid; Kind = kind; Tables = tables; Holder = holder; }
+        public DateTime FirstAt { get; } public DateTime LastAt { get; set; } public int Count { get; set; }
+        public string UserName { get; } public string InfoBase { get; } public int Pid { get; } public string Kind { get; }
+        public string Tables { get; set; } public string Context { get; set; } = ""; public string Holder { get; set; } public string Request { get; set; } = "";
+    }
+    private sealed record LockReportRow(string Time, string UserName, string InfoBase, int Pid, string Kind, string Tables, string Context, string Holder, string Request, int Count);
 }
 
 public sealed class MonitorSettings : NotifyBase
@@ -1316,6 +1480,48 @@ public sealed class SessionRow
     public string TechContext { get; set; } = ""; public double LastCallMs { get; set; }
     public string LastCallText => LastCallMs > 0 ? $"{LastCallMs:0} мс" : "—";
     public string Operation { get; set; } = ""; public string DbRequest { get; set; } = ""; public string Blocked { get; set; } = "нет";
+    // Расшифровка блокировки: номер соединения RAC, флаги типа и данные из событий TLOCK/DEADLOCK технологического журнала.
+    public int ConnectionId { get; set; } public bool BlockedByDbms { get; set; } public bool BlockedByLs { get; set; }
+    public string BlockedEvent { get; set; } = ""; public string BlockedTables { get; set; } = ""; public string BlockedContext { get; set; } = ""; public string BlockedHolder { get; set; } = "";
+    public bool IsBlockedNow => Blocked != "нет" || BlockedByDbms || BlockedByLs;
+    public string BlockedKindText => BlockedByDbms && BlockedByLs ? "DBMS + LS" : BlockedByDbms ? "DBMS" : BlockedByLs ? "LS" : IsBlockedNow ? "да" : "нет";
+    public string BlockedDetails
+    {
+        get
+        {
+            if (!IsBlockedNow) return "";
+            var parts = new List<string>
+            {
+                BlockedByDbms && BlockedByLs ? "тип: DBMS (ожидание снятия блокировки таблицы СУБД) и LS (логическая блокировка сервера 1С)"
+                    : BlockedByDbms ? "тип: DBMS — сеанс ожидает снятия блокировки таблицы СУБД"
+                    : BlockedByLs ? "тип: LS — логическая блокировка на сервере 1С"
+                    : "тип: блокировка по данным RAC"
+            };
+            if (BlockedEvent.Length > 0) parts.Add(BlockedEvent);
+            if (BlockedTables.Length > 0) parts.Add("таблицы: " + BlockedTables);
+            if (BlockedContext.Length > 0) parts.Add("модуль/документ: " + BlockedContext);
+            else if (TechContext.Length > 0) parts.Add("контекст ТЖ: " + TechContext);
+            if (BlockedHolder.Length > 0) parts.Add("удерживает: " + BlockedHolder);
+            if (!string.IsNullOrWhiteSpace(Operation)) parts.Add("операция: " + Operation);
+            if (!string.IsNullOrWhiteSpace(DbRequest)) parts.Add("запрос СУБД: " + DbRequest);
+            if (BlockedByDbms && BlockedTables.Length == 0) parts.Add("для расшифровки таблиц укажите каталог технологического журнала с включёнными классами DBLOCKS и DEADLOCK");
+            return string.Join("; ", parts);
+        }
+    }
+    public string BlockedAlertSuffix
+    {
+        get
+        {
+            if (!IsBlockedNow) return "";
+            var parts = new List<string>();
+            if (BlockedTables.Length > 0) parts.Add("таблицы: " + Trunc(BlockedTables, 80));
+            if (BlockedContext.Length > 0) parts.Add("модуль/документ: " + Trunc(BlockedContext, 80));
+            else if (TechContext.Length > 0) parts.Add("контекст: " + Trunc(TechContext, 80));
+            if (BlockedHolder.Length > 0) parts.Add("удерживает: " + Trunc(BlockedHolder, 90));
+            return parts.Count == 0 ? "" : "; " + string.Join("; ", parts);
+        }
+    }
+    private static string Trunc(string value, int max) => string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max] + "…";
 }
 public sealed record AlertRow(DateTime At, string Severity, string Source, string Message) { public string TimeText => At.ToString("dd.MM.yyyy HH:mm:ss"); }
 internal sealed record RacProcess(int Pid, string ProcessUuid, double MemoryMb, double AvgCallMs, double AvgDbMs);
