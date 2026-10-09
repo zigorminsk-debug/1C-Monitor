@@ -20,10 +20,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public ObservableCollection<ProcessRow> Processes { get; } = new();
     public ObservableCollection<SessionRow> Sessions { get; } = new();
     public ObservableCollection<AlertRow> Alerts { get; } = new();
+    public ObservableCollection<DriveOption> MonitorDriveOptions { get; } = new();
     public MonitorSettings Settings { get; }
     public ICommand RefreshCommand { get; }
     public ICommand ExportCommand { get; }
     public ICommand SaveSettingsCommand { get; }
+    public ICommand TestSqlConnectionCommand { get; }
     public ICommand StartRasCommand { get; }
     public ICommand OpenWebsiteCommand { get; }
     public ICommand OpenEmailCommand { get; }
@@ -63,7 +65,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly List<string> _cachedTechLogFiles = new();
     private RacSnapshot? _cachedRac;
     private DateTime _lastAutomaticDrain = DateTime.MinValue;
-    private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _racCandidatesCachedAt = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue;
+    private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _racCandidatesCachedAt = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue, _lastSqlDrivesRefresh = DateTime.MinValue;
     private string _cachedVolumeSummary = "не определены", _cachedStaticSystem = "";
     private readonly StringBuilder _log = new();
     private readonly DiskPerformanceMonitor _disk = new();
@@ -77,20 +79,39 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private string _serverHardwareText = "Определение оборудования…", _networkLoadText = "Сеть: ожидание первого измерения…";
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
+    private bool _autoTerminateSleepingEnabled;
+    private string _autoSleepStatus = "Автозавершение спящих сеансов выключено";
+    private DateTime _lastAutoSleepTerminate = DateTime.MinValue;
+    private string _sqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
+    private string _manualDiskStatus = "";
+    private string[] _sqlDrives = Array.Empty<string>();
+    private DiskSnapshot _lastDisk;
     private ProcessRow? _selectedProcess;
     private string? _lastRacPath, _lastClusterId;
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
     private IBrush _statusColor = Brushes.Goldenrod;
     private int _processCount, _sessionCount, _activeSessionCount, _sleepingSessionCount, _alertCount;
-    private string _totalMemoryText = "—", _totalCpuText = "—", _diskUsageText = "—", _diskIoText = "чтение — • запись —", _diskQueueText = "очередь —", _sessionBreakdownText = "активные — • спящие —", _logText = "";
+    private string _totalMemoryText = "—", _totalCpuText = "—", _diskUsageText = "—", _diskIoText = "чтение — • запись —", _diskQueueText = "очередь —", _diskScopeText = "PhysicalDisk (_Total)", _sessionBreakdownText = "активные — • спящие —", _logText = "";
 
     public MainViewModel()
     {
         Settings = MonitorSettings.Load();
         Settings.BackgroundJobsDisabledInfobases ??= new();
+        Settings.MonitorDrives ??= new();
+        _autoTerminateSleepingEnabled = Settings.AutoTerminateSleeping;
+        if (_autoTerminateSleepingEnabled) _autoSleepStatus = "Автозавершение спящих сеансов включено";
+        InitializeDriveOptions();
+        ApplyDiskTargets();
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
         ExportCommand = new RelayCommand(ExportHtmlReport);
-        SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; await RefreshAsync(true); });
+        SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; _lastSqlDrivesRefresh = DateTime.MinValue; await RefreshAsync(true); });
+        TestSqlConnectionCommand = new RelayCommand(async () =>
+        {
+            Settings.Save();
+            SqlDiskStatus = "Проверка подключения к SQL…";
+            _lastSqlDrivesRefresh = DateTime.Now; // плановая перепроверка откладывается — проверяем прямо сейчас
+            await RefreshSqlDataDrivesAsync();
+        });
         StartRasCommand = new RelayCommand(async () => await StartRasAsync());
         OpenWebsiteCommand = new RelayCommand(() => OpenUri("https://csl.by"));
         OpenEmailCommand = new RelayCommand(() => OpenUri("mailto:info@csl.by"));
@@ -124,6 +145,23 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string AdminConfirmationText { get => _adminConfirmationText; set => Set(ref _adminConfirmationText, value); }
     public string AdminActionStatus { get => _adminActionStatus; private set => Set(ref _adminActionStatus, value); }
     public string AutoDrainStatus { get => _autoDrainStatus; private set => Set(ref _autoDrainStatus, value); }
+    public string AutoSleepStatus { get => _autoSleepStatus; private set => Set(ref _autoSleepStatus, value); }
+    public bool AutoTerminateSleepingEnabled
+    {
+        get => _autoTerminateSleepingEnabled;
+        set
+        {
+            if (!Set(ref _autoTerminateSleepingEnabled, value)) return;
+            Settings.AutoTerminateSleeping = value;
+            try { Settings.Save(); } catch (Exception ex) { Log("Сохранение настройки автозавершения: " + ex.Message); }
+            AutoSleepStatus = value
+                ? "Автозавершение спящих сеансов включено: все спящие сеансы будут завершаться при каждом опросе RAC"
+                : "Автозавершение спящих сеансов выключено";
+            Log(AutoSleepStatus);
+        }
+    }
+    public string SqlDiskStatus { get => _sqlDiskStatus; private set => Set(ref _sqlDiskStatus, value); }
+    public string ManualDiskStatus { get => _manualDiskStatus; private set => Set(ref _manualDiskStatus, value); }
     public ProcessRow? SelectedProcess { get => _selectedProcess; set => Set(ref _selectedProcess, value); }
     public int ProcessCount { get => _processCount; private set => Set(ref _processCount, value); }
     public int SessionCount { get => _sessionCount; private set => Set(ref _sessionCount, value); }
@@ -135,6 +173,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string DiskUsageText { get => _diskUsageText; private set => Set(ref _diskUsageText, value); }
     public string DiskIoText { get => _diskIoText; private set => Set(ref _diskIoText, value); }
     public string DiskQueueText { get => _diskQueueText; private set => Set(ref _diskQueueText, value); }
+    public string DiskScopeText { get => _diskScopeText; private set => Set(ref _diskScopeText, value); }
     public string SessionBreakdownText { get => _sessionBreakdownText; private set => Set(ref _sessionBreakdownText, value); }
     public string LogText { get => _logText; private set => Set(ref _logText, value); }
 
@@ -243,7 +282,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var version = FileVersionInfo.GetVersionInfo(racPath).FileVersion ?? "?";
             oneC = $"1С/RAC {version} ({ArchitectureLabel(racPath)})";
         }
-        var diskText = disk.Available ? $"диск {disk.UsagePercent:0}% · R {FormatRate(disk.ReadBytesPerSec)} · W {FormatRate(disk.WriteBytesPerSec)} · ср. очередь {DiskQueueLabel(disk)}" : "диск: ожидание данных";
+        var diskText = disk.Available ? $"диск {disk.UsagePercent:0}% ({DiskScopeLabel(disk)}) · R {FormatRate(disk.ReadBytesPerSec)} · W {FormatRate(disk.WriteBytesPerSec)} · ср. очередь {DiskQueueLabel(disk)}" : "диск: ожидание данных";
         NetworkLoadText = network.Available ? $"Сеть: ↓ {FormatRate(network.ReceiveBytesPerSec)} · ↑ {FormatRate(network.SendBytesPerSec)} · загрузка {network.UtilizationPercent:0.0}% · адаптеров {network.InterfaceCount}" : "Сеть: ожидание второго измерения";
         if (DateTime.UtcNow - _lastVolumeRefresh >= TimeSpan.FromMinutes(1)) { _cachedVolumeSummary = GetVolumeSummary(); _lastVolumeRefresh = DateTime.UtcNow; }
         ServerHardwareText = $"{_virtualizationInfo} · {_physicalDiskInfo} · Тома: {_cachedVolumeSummary}";
@@ -261,6 +300,117 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             _physicalDiskInfo = disks.Length == 0 ? "Накопители: тип не определён" : "Накопители: " + string.Join("; ", disks);
         }
         catch (Exception ex) { _physicalDiskInfo = "Накопители: тип не определён"; Log("Определение SSD/HDD/NVMe: " + ex.Message); }
+    }
+
+    private void InitializeDriveOptions()
+    {
+        try
+        {
+            var selected = new HashSet<string>((Settings.MonitorDrives ?? new()).Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant()).Where(x => x.Length == 2 && x[1] == ':'), StringComparer.OrdinalIgnoreCase);
+            foreach (var d in DriveInfo.GetDrives().Where(d => d.IsReady && d.DriveType == DriveType.Fixed))
+            {
+                var letter = d.Name.TrimEnd('\\').ToUpperInvariant();
+                if (letter.Length != 2 || letter[1] != ':' || !char.IsLetter(letter[0])) continue;
+                string label;
+                try { label = $"{letter} ({d.TotalSize / 1073741824d:0} ГБ)"; } catch { label = letter; }
+                MonitorDriveOptions.Add(new DriveOption(letter, label, selected.Contains(letter), OnDriveOptionChanged));
+            }
+            // Отмеченные ранее диски, которых сейчас нет в системе, тоже показываем, чтобы выбор не потерялся.
+            foreach (var letter in selected.Where(l => MonitorDriveOptions.All(o => !o.Letter.Equals(l, StringComparison.OrdinalIgnoreCase))).ToList())
+                MonitorDriveOptions.Add(new DriveOption(letter, letter + " (сейчас недоступен)", true, OnDriveOptionChanged));
+        }
+        catch (Exception ex) { Log("Список дисков для мониторинга: " + ex.Message); }
+    }
+
+    private void OnDriveOptionChanged()
+    {
+        Settings.MonitorDrives = MonitorDriveOptions.Where(x => x.IsChecked).Select(x => x.Letter).ToList();
+        try { Settings.Save(); } catch (Exception ex) { Log("Сохранение выбора дисков: " + ex.Message); }
+        ApplyDiskTargets();
+    }
+
+    // Приоритет источников: ручной выбор чекбоксами → диск базы из SQL → все диски (_Total).
+    private void ApplyDiskTargets()
+    {
+        var manual = (Settings.MonitorDrives ?? new()).Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant())
+            .Where(x => x.Length == 2 && x[1] == ':' && char.IsLetter(x[0])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (manual.Length > 0)
+        {
+            _disk.SetTargetDrives(manual);
+            ManualDiskStatus = $"Вручную выбрано: {string.Join(", ", manual)} — очередь и нагрузка считаются только по этим дискам (приоритет над SQL)";
+        }
+        else if (_sqlDrives.Length > 0)
+        {
+            _disk.SetTargetDrives(_sqlDrives);
+            ManualDiskStatus = $"Диски не отмечены — используется диск базы данных SQL: {string.Join(", ", _sqlDrives)}";
+        }
+        else
+        {
+            _disk.SetTargetDrives(Array.Empty<string>());
+            ManualDiskStatus = "Диски не отмечены — используются все физические диски (_Total), пока SQL не определит диск базы";
+        }
+    }
+
+    private async Task RefreshSqlDataDrivesAsync()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var server = (Settings.SqlServer ?? "").Trim();
+        if (server.Length == 0)
+        {
+            _sqlDrives = Array.Empty<string>();
+            ApplyDiskTargets();
+            SqlDiskStatus = "Сервер SQL не указан — очередь и нагрузка диска считаются по всем физическим дискам (_Total)";
+            return;
+        }
+        if (!Settings.SqlWindowsAuth && string.IsNullOrWhiteSpace(Settings.SqlUser))
+        {
+            SqlDiskStatus = "Выбрана авторизация SQL Server, но пользователь не указан. Заполните пользователя и пароль или включите учётные данные Windows.";
+            return;
+        }
+        try
+        {
+            // Через sys.master_files узнаём, на каких томах лежат файлы базы данных (mdf/ndf/ldf),
+            // чтобы счётчики PhysicalDisk опрашивали только диск СУБД, а не все диски сервера.
+            // Используется System.Data.SqlClient из Windows PowerShell — дополнительные драйверы не нужны.
+            // Авторизация: учётные данные Windows (Integrated Security) либо логин и пароль SQL Server.
+            var connection = $"Server={server};Encrypt=False;TrustServerCertificate=True;Connect Timeout=5;Application Name=1C Server Monitor;"
+                + (Settings.SqlWindowsAuth
+                    ? "Integrated Security=True;"
+                    : $"User ID={Settings.SqlUser};Password={Settings.SqlPassword};");
+            var database = (Settings.SqlDatabase ?? "").Trim().Replace("'", "''");
+            var query = database.Length > 0
+                ? $"SELECT DISTINCT UPPER(LEFT(physical_name,1)) FROM sys.master_files WHERE database_id = DB_ID(N'{database}')"
+                : "SELECT DISTINCT UPPER(LEFT(physical_name,1)) FROM sys.master_files WHERE database_id > 4";
+            var script = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();" +
+                $"$cn=New-Object System.Data.SqlClient.SqlConnection('{connection.Replace("'", "''")}');$cn.Open();" +
+                $"$cmd=$cn.CreateCommand();$cmd.CommandText='{query.Replace("'", "''")}';" +
+                "$r=$cmd.ExecuteReader();while($r.Read()){$r.GetString(0)};$cn.Close()";
+            var output = await RunAsync("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", script }, 30);
+            var drives = output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(x => x.Length == 1 && char.IsLetter(x[0])).Select(x => x.ToUpperInvariant() + ":")
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+            if (drives.Length == 0)
+            {
+                _sqlDrives = Array.Empty<string>();
+                ApplyDiskTargets();
+                SqlDiskStatus = database.Length > 0
+                    ? $"SQL {server}: файлы базы «{Settings.SqlDatabase}» не найдены (проверьте имя базы) — используется _Total"
+                    : $"SQL {server}: пользовательские базы не найдены — используется _Total";
+                Log(SqlDiskStatus);
+                return;
+            }
+            _sqlDrives = drives;
+            ApplyDiskTargets();
+            SqlDiskStatus = $"SQL {server}: база развернута на диске {string.Join(", ", drives)} — очередь и нагрузка опрашиваются только по нему"
+                + ((Settings.MonitorDrives?.Count ?? 0) > 0 ? ". Внимание: сейчас действует ручной выбор дисков" : "");
+            LogOnce("sql-drives:" + string.Join(",", drives), SqlDiskStatus, TimeSpan.FromHours(1));
+        }
+        catch (Exception ex)
+        {
+            // Прежние настройки диска сохраняются: при временной ошибке SQL продолжаем опрашивать найденный ранее диск.
+            SqlDiskStatus = $"Ошибка подключения к SQL {server}: {ex.Message}";
+            LogOnce("sql:" + ex.Message, SqlDiskStatus, TimeSpan.FromMinutes(10));
+        }
     }
 
     private static string GetVolumeSummary()
@@ -304,14 +454,21 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private static string GetPhysicalMemory()
     {
-        if (!OperatingSystem.IsWindows()) return "не определена";
+        if (TryGetPhysicalMemoryBytes(out var total, out var available)) return $"{total / 1073741824d:0.0} ГБ, свободно {available / 1073741824d:0.0} ГБ";
+        return "не определена";
+    }
+
+    private static bool TryGetPhysicalMemoryBytes(out ulong total, out ulong available)
+    {
+        total = 0; available = 0;
+        if (!OperatingSystem.IsWindows()) return false;
         try
         {
             var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
-            if (GlobalMemoryStatusEx(ref status)) return $"{status.TotalPhys / 1073741824d:0.0} ГБ, свободно {status.AvailPhys / 1073741824d:0.0} ГБ";
+            if (GlobalMemoryStatusEx(ref status)) { total = status.TotalPhys; available = status.AvailPhys; return true; }
         }
         catch { }
-        return "не определена";
+        return false;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -340,7 +497,13 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         try
         {
             var local = SampleLocalProcesses();
+            if (DateTime.Now - _lastSqlDrivesRefresh >= TimeSpan.FromMinutes(5))
+            {
+                _lastSqlDrivesRefresh = DateTime.Now; // при ошибке SQL не повторяем тяжёлый запрос на каждом такте
+                await RefreshSqlDataDrivesAsync();
+            }
             var disk = _disk.Sample();
+            _lastDisk = disk;
             var network = _network.Sample();
             var now = DateTime.Now;
             RacSnapshot? rac = _cachedRac;
@@ -384,6 +547,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             }
 
             var sessions = rac?.Sessions ?? new List<SessionRow>();
+            if (racDue) await AutoTerminateSleepingAsync(sessions, now);
             if (racDue && (manual || now - _lastTechLogScan >= TimeSpan.FromSeconds(Math.Max(15, (double)Settings.TechLogPollSeconds))))
             {
                 ApplyTechLog(sessions); _lastTechLogScan = now;
@@ -442,6 +606,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
                 DiskIoText = disk.Available ? $"чтение {FormatRate(disk.ReadBytesPerSec)} • запись {FormatRate(disk.WriteBytesPerSec)}" : "счётчики недоступны";
                 DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)}" : "Windows PDH";
+                DiskScopeText = disk.Available
+                    ? (string.IsNullOrWhiteSpace(disk.DisksLabel) ? "PhysicalDisk (_Total) · все диски" : $"PhysicalDisk ({disk.DisksLabel}) · диск БД")
+                    : "PhysicalDisk";
                 Status = deviations.Count > 0 ? $"Отклонения: {deviations.Count} · {string.Join("; ", deviations.Take(3))}{(deviations.Count > 3 ? "; … подробнее на вкладке «Обзор»" : "")}" : "Нагрузка в норме";
                 StatusColor = deviations.Count > 0 ? Brushes.LightCoral : Brushes.LightGreen;
                 Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
@@ -528,8 +695,13 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         {
             var key = $"{at:yyyyMMdd}|{s.InfoBase}|{s.UserName}";
             if (!_dailyUsers.TryGetValue(key, out var stat)) _dailyUsers[key] = stat = new DailyUserStat(at.Date, s.UserName, s.InfoBase);
+            if (stat.FirstSeen == default) stat.FirstSeen = at;
+            stat.LastSeen = at;
             stat.Samples++; stat.Hosts.Add(s.Host); if (s.Pid > 0) stat.Pids.Add(s.Pid);
-            stat.MaxProcessCpu = Math.Max(stat.MaxProcessCpu, s.ProcessCpu); stat.MaxProcessMemoryMb = Math.Max(stat.MaxProcessMemoryMb, s.ProcessMemoryMb);
+            // Момент пика: когда обновился максимум CPU rphost; если CPU не измерялся — максимум длительности вызовов за 5 минут.
+            if (s.ProcessCpu > stat.MaxProcessCpu) { stat.MaxProcessCpu = s.ProcessCpu; stat.PeakAt = at; }
+            if (s.DurationLast5MinMs > stat.MaxDuration5Min && stat.MaxProcessCpu <= 0) stat.PeakAt = at;
+            stat.MaxProcessMemoryMb = Math.Max(stat.MaxProcessMemoryMb, s.ProcessMemoryMb);
             stat.MaxCpu5Min = Math.Max(stat.MaxCpu5Min, s.CpuTimeLast5Min); stat.MaxDuration5Min = Math.Max(stat.MaxDuration5Min, s.DurationLast5MinMs);
             stat.MaxDbDuration5Min = Math.Max(stat.MaxDbDuration5Min, s.DurationDbLast5MinMs); stat.MaxCalls5Min = Math.Max(stat.MaxCalls5Min, s.CallsLast5Min);
             stat.MaxMemory5MinMb = Math.Max(stat.MaxMemory5MinMb, Math.Abs(s.MemoryLast5MinMb));
@@ -547,6 +719,145 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         Settings.LastAutoReportDate = now.ToString("yyyy-MM-dd"); Settings.Save();
     }
 
+    // Автоматические выводы по накопленным за день данным: узкие места и рекомендации по устранению.
+    private List<(string Severity, string Observation, string Recommendation)> BuildDailyFindings(DateTime date, List<ServerHistoryRow> points, List<DailyUserStat> users)
+    {
+        var findings = new List<(string, string, string)>();
+        try
+        {
+            double cpuMax = points.Max(x => x.Cpu), cpuAvg = points.Average(x => x.Cpu);
+            double ramMax = points.Max(x => x.RamMb);
+            double diskMax = points.Max(x => x.DiskUsage), diskAvg = points.Average(x => x.DiskUsage);
+            double queueMax = points.Max(x => x.DiskQueue), queueAvg = points.Average(x => x.DiskQueue);
+            double netMax = points.Max(x => x.NetUsage);
+            int sessionsMax = points.Max(x => x.Sessions), sleepingMax = points.Max(x => x.SleepingSessions);
+            var busiestHour = points.GroupBy(x => x.At.Hour).OrderByDescending(g => g.Average(x => x.Cpu)).First().Key;
+            var topUsers = string.Join("; ", users.Take(3).Select(u => $"{u.UserName} ({u.InfoBase}, пик {(u.PeakAt == default ? u.LastSeen : u.PeakAt):HH:mm})"));
+
+            // Процессор
+            if (cpuMax >= (double)Settings.CpuAlert)
+                findings.Add((cpuMax >= 95 ? "КРИТИЧНО" : "ВНИМАНИЕ",
+                    $"Суммарный CPU rphost достигал {cpuMax:0}% (среднее за день {cpuAvg:0}%), самый нагруженный час — {busiestHour:00}:00–{busiestHour:00}:59.",
+                    $"Найдите виновников в таблице «Кто генерировал нагрузку» (дата и время пика указаны напротив каждого): {topUsers}. Перенесите тяжёлые отчёты и регламентные задания на нерабочие часы; при постоянной высокой загрузке добавьте vCPU или вынесите СУБД на отдельный сервер."));
+
+            // Память rphost (сравнение с физической памятью сервера)
+            if (TryGetPhysicalMemoryBytes(out var totalMemory, out _) && totalMemory > 0)
+            {
+                var ramPercent = ramMax * 1048576d / totalMemory * 100d;
+                if (ramPercent >= 70)
+                    findings.Add((ramPercent >= 90 ? "КРИТИЧНО" : "ВНИМАНИЕ",
+                        $"Суммарная память rphost достигала {FormatMb(ramMax)} — {ramPercent:0}% физической памяти сервера ({totalMemory / 1073741824d:0.0} ГБ).",
+                        "Оставляйте СУБД не менее 30–40% памяти. Включите плавный автовывод rphost (вкладка «Настройки») для перезапуска разросшихся процессов, проверьте запросы, выгружающие большие таблицы целиком, или увеличьте объём ОЗУ."));
+            }
+            var heavyPids = _history.Where(h => h.At.Date == date.Date).GroupBy(h => h.Pid)
+                .Select(g => (Pid: g.Key, MaxMb: g.Max(x => x.MemoryMb))).Where(x => x.MaxMb >= (double)Settings.MemoryAlertMb)
+                .OrderByDescending(x => x.MaxMb).Take(5).ToList();
+            if (heavyPids.Count > 0)
+                findings.Add(("ВНИМАНИЕ",
+                    $"Процессы rphost превышали порог памяти {Settings.MemoryAlertMb:0} МБ: {string.Join(", ", heavyPids.Select(p => $"PID {p.Pid} до {FormatMb(p.MaxMb)}"))}.",
+                    Settings.AutoDrainEnabled
+                        ? "Автовывод уже включён — проверьте журнал, выводились ли эти процессы, и при необходимости снизьте порог автовывода."
+                        : "Включите плавный автовывод rphost в настройках: разросшийся процесс будет выведен без обрыва сеансов. Также проверьте отчёты и обработки пользователей этих PID в таблице «Кто генерировал нагрузку»."));
+
+            // Диск и очередь
+            if (diskMax >= (double)Settings.DiskAlert || queueAvg > 2)
+                findings.Add((diskMax >= 98 || queueAvg > 8 ? "КРИТИЧНО" : "ВНИМАНИЕ",
+                    $"Дисковая подсистема ({(string.IsNullOrWhiteSpace(_lastDisk.DisksLabel) ? "все диски" : "диск БД " + _lastDisk.DisksLabel)}): загрузка до {diskMax:0}% (среднее {diskAvg:0}%), очередь в среднем {queueAvg:0.00}, максимум {queueMax:0.00}. Очередь стабильно выше 2 — признак узкого места ввода-вывода.",
+                    "Перенесите файлы базы и tempdb на SSD/NVMe; разнесите файлы данных (mdf) и журналов (ldf) по разным физическим дискам; исключите каталоги СУБД из антивирусной проверки; проверьте свежесть статистики и фрагментацию индексов — лишние чтения создают очередь."));
+            else if (queueMax < 0.01 && diskMax >= 90)
+                findings.Add(("ИНФО",
+                    $"Загрузка диска достигала {diskMax:0}%, но очередь всегда 0 — вероятно, драйвер SAN/RAID не сообщает очередь в счётчики Windows.",
+                    "Оценивайте диск по загрузке и скоростям чтения/записи; очередь смотрите средствами СХД."));
+            if (string.IsNullOrWhiteSpace(Settings.SqlServer) && (Settings.MonitorDrives?.Count ?? 0) == 0)
+                findings.Add(("ИНФО",
+                    "Диск контролируется суммарно по всем физическим дискам (_Total) — показатели могут размываться дисками, не связанными с базой.",
+                    "Укажите подключение к серверу SQL в настройках (или отметьте диски вручную), чтобы очередь и нагрузка считались только по диску базы данных."));
+
+            // Блокировки
+            int blockings = 0;
+            try { blockings = Alerts.ToList().Count(a => a.At.Date == date.Date && a.Severity == "БЛОКИРОВКА"); } catch { }
+            if (blockings > 0)
+                findings.Add((blockings >= 10 ? "КРИТИЧНО" : "ВНИМАНИЕ",
+                    $"За день зафиксировано блокировок сеансов: {blockings} (см. вкладку «Обзор» и журнал).",
+                    "Найдите длинные транзакции: в карточке сеанса смотрите «Запрос СУБД» и контекст техжурнала. Сократите время проведения документов, обновите статистику и перестройте индексы; при массовых взаимоблокировках переведите конфигурацию на управляемые блокировки."));
+
+            // Долгие запросы к СУБД
+            var slowDb = users.Where(u => u.MaxDbDuration5Min >= 30000).OrderByDescending(u => u.MaxDbDuration5Min).Take(3).ToList();
+            if (slowDb.Count > 0)
+                findings.Add(("ВНИМАНИЕ",
+                    $"Долгая работа с СУБД (свыше 30 с за 5-минутное окно): {string.Join("; ", slowDb.Select(u => $"{u.UserName} — {u.MaxDbDuration5Min / 1000:0} с, пик {(u.PeakAt == default ? u.LastSeen : u.PeakAt):HH:mm}, контекст: {(string.IsNullOrWhiteSpace(u.LastContext) ? "не определён" : u.LastContext)}"))}.",
+                    "Проверьте указанные документы/отчёты: добавьте недостающие индексы, избавьтесь от запросов в цикле и соединений с виртуальными таблицами без параметров. Для точной диагностики включите технологический журнал (каталог указывается в настройках)."));
+
+            // Спящие сеансы
+            if (sleepingMax >= 10 && sleepingMax >= sessionsMax * 0.4)
+                findings.Add(("ИНФО",
+                    $"Значительная доля спящих сеансов: до {sleepingMax} из {sessionsMax}. Они занимают лицензии и память.",
+                    "Завершайте спящие сеансы кнопкой на вкладке «Действия» и настройте в кластере 1С время засыпания/завершения пассивных сеансов. Проверьте, что пользователи не оставляют клиент открытым на ночь."));
+
+            // Сеть
+            if (netMax >= 80)
+                findings.Add(("ВНИМАНИЕ",
+                    $"Загрузка сети достигала {netMax:0}% пропускной способности.",
+                    "Проверьте, не выполняются ли выгрузки/обмены в рабочие часы; перенесите обмены на ночь или увеличьте пропускную способность канала между сервером 1С и СУБД."));
+
+            if (findings.Count == 0)
+                findings.Add(("НОРМА",
+                    $"Критичных отклонений за {date:dd.MM.yyyy} не выявлено: CPU до {cpuMax:0}%, память rphost до {FormatMb(ramMax)}, диск до {diskMax:0}% (очередь в среднем {queueAvg:0.00}), сеансов до {sessionsMax}.",
+                    "Продолжайте наблюдение. При росте числа пользователей следите за очередью диска базы и памятью rphost — это первые индикаторы деградации."));
+        }
+        catch (Exception ex) { Log("Анализ для отчёта: " + ex.Message); }
+        return findings;
+    }
+
+    // Выводы по текущему состоянию для мгновенного HTML-отчёта.
+    private List<(string Severity, string Observation, string Recommendation)> BuildCurrentFindings()
+    {
+        var findings = new List<(string, string, string)>();
+        try
+        {
+            var disk = _lastDisk;
+            var processes = Processes.ToList(); var sessions = Sessions.ToList();
+            var highCpu = processes.Where(p => p.Cpu >= (double)Settings.CpuAlert).ToList();
+            if (highCpu.Count > 0)
+                findings.Add(("КРИТИЧНО",
+                    $"Высокий CPU: {string.Join(", ", highCpu.Select(p => $"PID {p.Pid} — {p.Cpu:0}% (пользователи: {(string.IsNullOrWhiteSpace(p.Users) ? "нет данных" : p.Users)})"))}.",
+                    "Откройте вкладку «Сеансы», отсортируйте по «Нагрузке за 5 минут» и найдите виновника; тяжёлые отчёты перенесите на нерабочее время."));
+            var highMemory = processes.Where(p => p.MemoryMb >= (double)Settings.MemoryAlertMb).ToList();
+            if (highMemory.Count > 0)
+                findings.Add(("ВНИМАНИЕ",
+                    $"Память rphost выше порога {Settings.MemoryAlertMb:0} МБ: {string.Join(", ", highMemory.Select(p => $"PID {p.Pid} — {p.MemoryText}"))}.",
+                    Settings.AutoDrainEnabled ? "Автовывод включён — процесс будет выведен плавно; при необходимости выведите вручную кнопкой «Плавно вывести выбранный rphost»."
+                        : "Выведите процесс плавно (вкладка «Действия») или включите автовывод rphost в настройках."));
+            var slowCalls = processes.Where(p => p.AvgCallMs >= (double)Settings.CallAlertMs).ToList();
+            if (slowCalls.Count > 0)
+                findings.Add(("ВНИМАНИЕ",
+                    $"Долгие серверные вызовы: {string.Join(", ", slowCalls.Select(p => $"PID {p.Pid} — средний вызов {p.AvgCallMs:0} мс"))}.",
+                    "Проверьте «Запрос СУБД» и контекст техжурнала у сеансов этих процессов; обычно причина — неоптимальные запросы или блокировки."));
+            var blocked = sessions.Where(s => s.Blocked != "нет").ToList();
+            if (blocked.Count > 0)
+                findings.Add(("КРИТИЧНО",
+                    $"Блокировки прямо сейчас: {string.Join("; ", blocked.Take(5).Select(s => $"{s.UserName} ({s.InfoBase})"))}{(blocked.Count > 5 ? $" и ещё {blocked.Count - 5}" : "")}.",
+                    "Найдите удерживающую транзакцию (обычно самый долгий текущий вызов в той же базе) и дождитесь её завершения или завершите сеанс-виновник. Системно: сократите транзакции, обновите индексы и статистику."));
+            if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert)
+                findings.Add((disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ",
+                    $"Диск ({(string.IsNullOrWhiteSpace(disk.DisksLabel) ? "все диски" : "диск БД " + disk.DisksLabel)}): загрузка {disk.UsagePercent:0}%, очередь {DiskQueueLabel(disk)}.",
+                    "Если очередь стабильно выше 2 — ввод-вывод является узким местом: перенесите базу и tempdb на SSD/NVMe, разнесите данные и журналы по разным дискам, исключите СУБД из антивируса."));
+            var sleeping = sessions.Count(s => s.IsSleeping);
+            if (sleeping >= 10 && sleeping >= sessions.Count * 0.4)
+                findings.Add(("ИНФО",
+                    $"Спящих сеансов {sleeping} из {sessions.Count} — занимают лицензии и память.",
+                    "Завершите спящие сеансы на вкладке «Действия» и настройте автоматическое завершение пассивных сеансов в кластере 1С."));
+            if (findings.Count == 0)
+                findings.Add(("НОРМА",
+                    $"Отклонений не обнаружено: rphost {processes.Count}, сеансов {sessions.Count}, диск {(disk.Available ? $"{disk.UsagePercent:0.0}%" : "н/д")}, очередь {(disk.Available ? DiskQueueLabel(disk) : "н/д")}.",
+                    "Сервер работает в штатном режиме. Для контроля именно диска базы данных укажите подключение к SQL в настройках."));
+        }
+        catch (Exception ex) { Log("Анализ текущего состояния: " + ex.Message); }
+        return findings;
+    }
+
+    private static string FindingCss(string severity) => severity switch { "КРИТИЧНО" => "critical", "ВНИМАНИЕ" => "warn", "НОРМА" => "ok", _ => "" };
+
     private void GenerateDailyReport(DateTime date, bool automatic)
     {
         try
@@ -558,7 +869,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             Directory.CreateDirectory(folder); var file = Path.Combine(folder, $"1C-daily-{Environment.MachineName}-{date:yyyy-MM-dd}.html");
             var hourly = points.GroupBy(x => x.At.Hour).Select(g => new { Hour = g.Key, AvgCpu = g.Average(x => x.Cpu), MaxCpu = g.Max(x => x.Cpu), AvgRam = g.Average(x => x.RamMb), MaxRam = g.Max(x => x.RamMb), AvgDisk = g.Average(x => x.DiskUsage), MaxDisk = g.Max(x => x.DiskUsage), MaxRead = g.Max(x => x.DiskRead), MaxWrite = g.Max(x => x.DiskWrite), MaxQueue = g.Max(x => x.DiskQueue), MaxNetIn = g.Max(x => x.NetIn), MaxNetOut = g.Max(x => x.NetOut), MaxSessions = g.Max(x => x.Sessions) }).ToList();
             var sb = new StringBuilder(200000);
-            sb.Append("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Суточный отчёт 1С</title><style>body{font:14px Segoe UI,Arial;background:#f4f7fb;color:#172033;margin:0;padding:24px}h1,h2{margin:0 0 12px}.sub{color:#64748b;margin-bottom:18px}.card,section{background:#fff;border:1px solid #dbe3ef;border-radius:10px;padding:16px;margin:12px 0;overflow-x:auto}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.cards .card{margin:0}.v{font-size:22px;font-weight:700}table{border-collapse:collapse;width:100%;table-layout:auto}th,td{padding:8px 10px;border-bottom:1px solid #dbe3ef;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}th{background:#eef3fa;white-space:nowrap}.bad{color:#b91c1c;font-weight:700}.wide{min-width:260px}@media print{@page{size:A4 landscape;margin:8mm}body{background:#fff;padding:0}}</style></head><body>");
+            sb.Append("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Суточный отчёт 1С</title><style>body{font:14px Segoe UI,Arial;background:#f4f7fb;color:#172033;margin:0;padding:24px}h1,h2{margin:0 0 12px}.sub{color:#64748b;margin-bottom:18px}.card,section{background:#fff;border:1px solid #dbe3ef;border-radius:10px;padding:16px;margin:12px 0;overflow-x:auto}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.cards .card{margin:0}.v{font-size:22px;font-weight:700}table{border-collapse:collapse;width:100%;table-layout:auto}th,td{padding:8px 10px;border-bottom:1px solid #dbe3ef;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}th{background:#eef3fa;white-space:nowrap}.bad{color:#b91c1c;font-weight:700}.wide{min-width:260px}.nowrap{white-space:nowrap;overflow-wrap:normal}.critical{color:#b91c1c;font-weight:700}.warn{color:#c2410c;font-weight:700}.ok{color:#047857;font-weight:700}@media print{@page{size:A4 landscape;margin:8mm}body{background:#fff;padding:0}}</style></head><body>");
             sb.Append($"<h1>{H(Environment.MachineName)} — нагрузка сервера 1С за {date:dd.MM.yyyy}</h1><div class=\"sub\">Покрытие {points.First().At:HH:mm:ss}–{points.Last().At:HH:mm:ss}, измерений: {points.Count} · Разработчик: Zakharevich Igor</div><div class=\"cards\">");
             DailyCard("Максимальный CPU", $"{points.Max(x => x.Cpu):0.0}%"); DailyCard("Максимальная RAM", FormatMb(points.Max(x => x.RamMb))); DailyCard("Максимум диска", $"{points.Max(x => x.DiskUsage):0.0}%"); DailyCard("Очередь диска", $"{points.Max(x => x.DiskQueue):0.0}"); DailyCard("Сеть приём", FormatRate(points.Max(x => x.NetIn))); DailyCard("Сеть отправка", FormatRate(points.Max(x => x.NetOut))); DailyCard("Максимум сеансов", points.Max(x => x.Sessions).ToString());
             var racDescription = !string.IsNullOrWhiteSpace(_lastRacPath) && File.Exists(_lastRacPath) ? $"{FileVersionInfo.GetVersionInfo(_lastRacPath).FileVersion} · {ArchitectureLabel(_lastRacPath)} · {_lastRacPath}" : "не подключён";
@@ -566,13 +877,21 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             ServerParam("Имя сервера", Environment.MachineName); ServerParam("Операционная система", RuntimeInformation.OSDescription.Trim()); ServerParam("Архитектура ОС", RuntimeInformation.OSArchitecture.ToString());
             ServerParam("Процессор", GetCpuDescription()); ServerParam("Логические процессоры", Environment.ProcessorCount.ToString()); ServerParam("Оперативная память", GetPhysicalMemory());
             ServerParam("Тип сервера и виртуализация", _virtualizationInfo); ServerParam("Физические накопители", _physicalDiskInfo); ServerParam("Тома, занято и свободно", GetVolumeSummary());
-            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
-            ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
+            ServerParam("Платформа 1С / RAC", racDescription); ServerParam("Адрес RAS", Settings.Endpoint); ServerParam("Контроль диска СУБД", SqlDiskStatus); ServerParam("Выбор дисков мониторинга", ManualDiskStatus); ServerParam("Процессы rphost на момент отчёта", ProcessCount.ToString());
+            ServerParam("Текущая сеть", NetworkLoadText); ServerParam("Текущий диск", $"{DiskUsageText} · {DiskIoText} · {DiskQueueText} · {DiskScopeText}"); ServerParam("Период сбора", $"{points.First().At:dd.MM.yyyy HH:mm:ss} — {points.Last().At:dd.MM.yyyy HH:mm:ss}");
             sb.Append("</tbody></table><p class=\"sub\">Отчёт описывает фактически наблюдавшийся период. Средние и максимальные значения рассчитаны по измерениям программы, а нагрузка пользователей сопоставлена с сеансами и процессами 1С через RAC.</p></section>");
+            sb.Append("<section><h2>Выводы и рекомендации</h2><table><thead><tr><th>Статус</th><th class=\"wide\">Наблюдение</th><th class=\"wide\">Рекомендация по устранению</th></tr></thead><tbody>");
+            foreach (var finding in BuildDailyFindings(date, points, users))
+                sb.Append($"<tr><td class=\"{FindingCss(finding.Severity)} nowrap\">{H(finding.Severity)}</td><td class=\"wide\">{H(finding.Observation)}</td><td class=\"wide\">{H(finding.Recommendation)}</td></tr>");
+            sb.Append("</tbody></table><p class=\"sub\">Выводы сформированы автоматически по порогам из настроек монитора и накопленным за день измерениям.</p></section>");
             sb.Append("<section><h2>Рост нагрузки по часам</h2><table><thead><tr><th>Час</th><th>CPU сред.</th><th>CPU макс.</th><th>RAM сред.</th><th>RAM макс.</th><th>Диск сред.</th><th>Диск макс.</th><th>Чтение макс.</th><th>Запись макс.</th><th>Очередь</th><th>Сеть ↓</th><th>Сеть ↑</th><th>Сеансы</th></tr></thead><tbody>");
             foreach (var h in hourly) sb.Append($"<tr><td>{h.Hour:00}:00</td><td>{h.AvgCpu:0.0}%</td><td>{h.MaxCpu:0.0}%</td><td>{FormatMb(h.AvgRam)}</td><td>{FormatMb(h.MaxRam)}</td><td>{h.AvgDisk:0.0}%</td><td class=\"{(h.MaxDisk >= 90 ? "bad" : "")}\">{h.MaxDisk:0.0}%</td><td>{FormatRate(h.MaxRead)}</td><td>{FormatRate(h.MaxWrite)}</td><td>{h.MaxQueue:0.0}</td><td>{FormatRate(h.MaxNetIn)}</td><td>{FormatRate(h.MaxNetOut)}</td><td>{h.MaxSessions}</td></tr>");
-            sb.Append("</tbody></table></section><section><h2>Кто генерировал нагрузку</h2><table><thead><tr><th>Пользователь</th><th>База</th><th>Компьютеры</th><th>PID</th><th>CPU rphost макс.</th><th>RAM rphost макс.</th><th>CPU-время 5 мин</th><th>Вызовы 5 мин</th><th>Время 5 мин</th><th>СУБД 5 мин</th><th>ΔRAM 5 мин</th><th class=\"wide\">Документ/контекст</th></tr></thead><tbody>");
-            foreach (var u in users) sb.Append($"<tr><td>{H(u.UserName)}</td><td>{H(u.InfoBase)}</td><td>{H(string.Join(", ", u.Hosts))}</td><td>{H(string.Join(", ", u.Pids))}</td><td>{u.MaxProcessCpu:0.0}%</td><td>{FormatMb(u.MaxProcessMemoryMb)}</td><td>{u.MaxCpu5Min:0} мс</td><td>{u.MaxCalls5Min}</td><td>{u.MaxDuration5Min / 1000:0.0} с</td><td>{u.MaxDbDuration5Min / 1000:0.0} с</td><td>{u.MaxMemory5MinMb:0.0} МБ</td><td class=\"wide\">{H(u.LastContext)}</td></tr>");
+            sb.Append("</tbody></table></section><section><h2>Кто генерировал нагрузку</h2><table><thead><tr><th>Пользователь</th><th>База</th><th>Пик нагрузки (дата и время)</th><th>Активность (с — по)</th><th>Компьютеры</th><th>PID</th><th>CPU rphost макс.</th><th>RAM rphost макс.</th><th>CPU-время 5 мин</th><th>Вызовы 5 мин</th><th>Время 5 мин</th><th>СУБД 5 мин</th><th>ΔRAM 5 мин</th><th class=\"wide\">Документ/контекст</th></tr></thead><tbody>");
+            foreach (var u in users)
+            {
+                var peak = u.PeakAt == default ? u.LastSeen : u.PeakAt;
+                sb.Append($"<tr><td>{H(u.UserName)}</td><td>{H(u.InfoBase)}</td><td class=\"nowrap\"><b>{peak:dd.MM.yyyy HH:mm:ss}</b></td><td class=\"nowrap\">{u.FirstSeen:dd.MM.yyyy HH:mm} — {u.LastSeen:HH:mm}</td><td>{H(string.Join(", ", u.Hosts))}</td><td>{H(string.Join(", ", u.Pids))}</td><td>{u.MaxProcessCpu:0.0}%</td><td>{FormatMb(u.MaxProcessMemoryMb)}</td><td>{u.MaxCpu5Min:0} мс</td><td>{u.MaxCalls5Min}</td><td>{u.MaxDuration5Min / 1000:0.0} с</td><td>{u.MaxDbDuration5Min / 1000:0.0} с</td><td>{u.MaxMemory5MinMb:0.0} МБ</td><td class=\"wide\">{H(u.LastContext)}</td></tr>");
+            }
             sb.Append("</tbody></table></section><section><b>Контакты:</b> Zakharevich Igor · <a href=\"https://csl.by\">csl.by</a> · <a href=\"mailto:info@csl.by\">info@csl.by</a> · +375 29 337 14 12</section></body></html>");
             File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true)); AdminActionStatus = (automatic ? "Автоотчёт создан: " : "Отчёт создан: ") + file; Log(AdminActionStatus);
             if (!automatic && OperatingSystem.IsWindows()) Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
@@ -688,28 +1007,57 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         foreach (var s in targets.Where(x => !string.IsNullOrWhiteSpace(x.SessionUuid)))
         {
             AdminActionStatus = $"Завершается сеанс {s.UserName} ({ok + errors + 1}/{targets.Count})…";
-            var auth = new List<string> { $"--cluster={_lastClusterId}" };
-            if (!string.IsNullOrWhiteSpace(Settings.ClusterUser)) { auth.Add($"--cluster-user={Settings.ClusterUser}"); auth.Add($"--cluster-pwd={Settings.ClusterPassword}"); }
-            var variants = new List<List<string>>
-            {
-                new() { "session" },
-                new() { "session", "terminate" },
-                new() { Settings.Endpoint, "session" }
-            };
-            variants[0].AddRange(auth); variants[0].Add("terminate"); variants[0].Add($"--session={s.SessionUuid}"); variants[0].Add(Settings.Endpoint);
-            variants[1].AddRange(auth); variants[1].Add($"--session={s.SessionUuid}"); variants[1].Add(Settings.Endpoint);
-            variants[2].AddRange(auth); variants[2].Add("terminate"); variants[2].Add($"--session={s.SessionUuid}");
-            Exception? last = null; var terminated = false;
-            foreach (var args in variants)
-            {
-                try { await RunAsync(_lastRacPath, args); terminated = true; break; }
-                catch (Exception ex) { last = ex; }
-            }
+            var (terminated, error) = await TerminateSessionCoreAsync(s);
             if (terminated) { ok++; Log($"Сеанс завершён: {s.UserName}, UUID {s.SessionUuid}"); }
-            else { errors++; Log($"Не завершён сеанс {s.UserName}: {last?.Message}"); }
+            else { errors++; Log($"Не завершён сеанс {s.UserName}: {error}"); }
         }
         await Task.Delay(1200);
         AdminConfirmationText = ""; AdminActionStatus = $"Завершение {description}: успешно {ok}, ошибок {errors}. Подробности во вкладке «Журнал»."; Log(AdminActionStatus); await RefreshAsync(true);
+    }
+
+    // Завершение одного сеанса через RAC: используется и кнопками, и автозавершением спящих сеансов.
+    private async Task<(bool Ok, string? Error)> TerminateSessionCoreAsync(SessionRow s)
+    {
+        if (_lastRacPath == null || _lastClusterId == null) return (false, "нет подключения RAC");
+        if (string.IsNullOrWhiteSpace(s.SessionUuid)) return (false, "у сеанса нет UUID");
+        var auth = new List<string> { $"--cluster={_lastClusterId}" };
+        if (!string.IsNullOrWhiteSpace(Settings.ClusterUser)) { auth.Add($"--cluster-user={Settings.ClusterUser}"); auth.Add($"--cluster-pwd={Settings.ClusterPassword}"); }
+        var variants = new List<List<string>>
+        {
+            new() { "session" },
+            new() { "session", "terminate" },
+            new() { Settings.Endpoint, "session" }
+        };
+        variants[0].AddRange(auth); variants[0].Add("terminate"); variants[0].Add($"--session={s.SessionUuid}"); variants[0].Add(Settings.Endpoint);
+        variants[1].AddRange(auth); variants[1].Add($"--session={s.SessionUuid}"); variants[1].Add(Settings.Endpoint);
+        variants[2].AddRange(auth); variants[2].Add("terminate"); variants[2].Add($"--session={s.SessionUuid}");
+        Exception? last = null;
+        foreach (var args in variants)
+        {
+            try { await RunAsync(_lastRacPath, args); return (true, null); }
+            catch (Exception ex) { last = ex; }
+        }
+        return (false, last?.Message);
+    }
+
+    // Автоматическое завершение всех спящих сеансов (без контрольной фразы — включается тумблером в администрировании).
+    private async Task AutoTerminateSleepingAsync(List<SessionRow> sessions, DateTime now)
+    {
+        if (!Settings.AutoTerminateSleeping) return;
+        if (_lastRacPath == null || _lastClusterId == null) { AutoSleepStatus = "Автозавершение спящих: нет подключения RAC"; return; }
+        var sleeping = sessions.Where(x => x.IsSleeping && !string.IsNullOrWhiteSpace(x.SessionUuid)).ToList();
+        if (sleeping.Count == 0) { AutoSleepStatus = $"Автозавершение спящих включено · спящих сеансов нет ({now:HH:mm:ss})"; return; }
+        if ((now - _lastAutoSleepTerminate).TotalSeconds < 60) return; // защита от повторного залпа, пока RAC не обновил список
+        _lastAutoSleepTerminate = now;
+        var ok = 0; var errors = 0;
+        foreach (var s in sleeping)
+        {
+            var (terminated, error) = await TerminateSessionCoreAsync(s);
+            if (terminated) { ok++; Log($"Автозавершение: спящий сеанс завершён — {s.UserName}, база {s.InfoBase}, UUID {s.SessionUuid}"); }
+            else { errors++; Log($"Автозавершение: не завершён спящий сеанс {s.UserName}: {error}"); }
+        }
+        AutoSleepStatus = $"Автозавершение спящих: завершено {ok}, ошибок {errors} ({now:HH:mm:ss})";
+        Log(AutoSleepStatus);
     }
 
     private async Task RestartOneCServicesAsync()
@@ -821,7 +1169,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         var candidates = new List<(string Key, AlertRow Row)>();
         if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert)
-            candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал, чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
+            candidates.Add(("disk", new(now, disk.UsagePercent >= 98 ? "КРИТИЧНО" : "ВНИМАНИЕ", "Диск", $"Загрузка {disk.UsagePercent:0.0}% за интервал ({DiskScopeLabel(disk)}), чтение {FormatRate(disk.ReadBytesPerSec)}, запись {FormatRate(disk.WriteBytesPerSec)}, средняя очередь {DiskQueueLabel(disk)}")));
         foreach (var p in proc.Where(x => x.Risk >= 50)) candidates.Add(($"pid:{p.Pid}", new(now, p.Risk >= 80 ? "КРИТИЧНО" : "ВНИМАНИЕ", $"PID {p.Pid}", p.Diagnosis + (string.IsNullOrEmpty(p.Users) ? "" : $"; пользователи: {p.Users}"))));
         foreach (var s in sessions.Where(x => x.Blocked != "нет")) candidates.Add(($"block:{s.SessionUuid}:{s.Pid}", new(now, "БЛОКИРОВКА", s.UserName, $"База {s.InfoBase}, PID {s.Pid}, {s.Blocked}")));
 
@@ -1277,8 +1625,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             sb.Append("<div class=\"cards\">");
             Card("Процессы rphost", ProcessCount.ToString()); Card("CPU rphost", TotalCpuText); Card("Память rphost", TotalMemoryText);
             Card("Активные сеансы", ActiveSessionCount.ToString()); Card("Спящие сеансы", SleepingSessionCount.ToString()); Card("Тревоги", AlertCount.ToString());
-            Card("Загрузка диска", DiskUsageText); Card("Ввод-вывод", DiskIoText); Card("Очередь диска", DiskQueueText); Card("Сеть", NetworkLoadText);
+            Card("Загрузка диска", DiskUsageText); Card("Ввод-вывод", DiskIoText); Card("Очередь диска", $"{DiskQueueText} · {DiskScopeText}"); Card("Сеть", NetworkLoadText);
             sb.Append("</div>");
+            sb.Append("<section class=\"section\"><h2>Выводы и рекомендации</h2><table><thead><tr><th class=\"nowrap\">Статус</th><th class=\"wide\">Наблюдение</th><th class=\"wide\">Рекомендация по устранению</th></tr></thead><tbody>");
+            foreach (var finding in BuildCurrentFindings())
+                sb.Append($"<tr><td class=\"{FindingCss(finding.Severity)} nowrap\">{H(finding.Severity)}</td><td class=\"wide\">{H(finding.Observation)}</td><td class=\"wide\">{H(finding.Recommendation)}</td></tr>");
+            sb.Append("</tbody></table><div class=\"note\">Выводы сформированы автоматически по текущему состоянию и порогам тревог из настроек. Для динамики за день используйте суточный отчёт.</div></section>");
             sb.Append($"<section class=\"section\"><h2>Сервер и накопители</h2><p>{H(ServerHeaderDetails).Replace("\n", "<br>")}</p><p><strong>Оборудование:</strong> {H(ServerHardwareText)}</p><p><strong>Сеть:</strong> {H(NetworkLoadText)}</p></section>");
             sb.Append("<section class=\"section\"><h2>Рабочие процессы</h2><table><thead><tr><th>Риск</th><th>PID</th><th>Состояние процесса</th><th>CPU</th><th>RAM</th><th>Сеансы</th><th>Средний вызов</th><th>Средний запрос БД</th><th class=\"wide\">Пользователи</th><th class=\"wide\">Диагноз</th></tr></thead><tbody>");
             foreach (var p in Processes) sb.Append($"<tr><td class=\"{RiskCss(p.Risk)} nowrap\">{p.Risk}</td><td class=\"nowrap\">{p.Pid}</td><td>{H(p.DrainStatus)}</td><td class=\"nowrap\">{H(p.CpuText)}</td><td class=\"nowrap\">{H(p.MemoryText)}</td><td>{p.SessionCount}</td><td class=\"nowrap\">{H(p.AvgCallText)}</td><td class=\"nowrap\">{H(p.AvgDbText)}</td><td class=\"wide\">{H(p.Users)}</td><td class=\"wide\">{H(p.Diagnosis)}</td></tr>");
@@ -1343,6 +1695,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             return "0,00 (возможно, драйвер SAN/RAID не сообщает)";
         return disk.QueueLength.ToString("0.00", CultureInfo.CurrentCulture);
     }
+    private static string DiskScopeLabel(DiskSnapshot disk) => string.IsNullOrWhiteSpace(disk.DisksLabel) ? "все диски" : $"диск БД {disk.DisksLabel}";
     private static string F(double value) => value.ToString("0.00", CultureInfo.InvariantCulture);
     private static string Csv(string s) => "\"" + (s ?? "").Replace("\"", "\"\"") + "\"";
     private static void Replace<T>(ObservableCollection<T> target, IEnumerable<T> src) { target.Clear(); foreach (var x in src) target.Add(x); }
@@ -1361,6 +1714,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         public DailyUserStat(DateTime date, string userName, string infoBase) { Date = date; UserName = userName; InfoBase = infoBase; }
         public DateTime Date { get; } public string UserName { get; } public string InfoBase { get; } public int Samples { get; set; }
+        // Когда пользователь наблюдался и когда зафиксирован пик его нагрузки.
+        public DateTime FirstSeen { get; set; } public DateTime LastSeen { get; set; } public DateTime PeakAt { get; set; }
         public HashSet<string> Hosts { get; } = new(StringComparer.OrdinalIgnoreCase); public HashSet<int> Pids { get; } = new();
         public double MaxProcessCpu { get; set; } public double MaxProcessMemoryMb { get; set; } public double MaxCpu5Min { get; set; }
         public double MaxDuration5Min { get; set; } public double MaxDbDuration5Min { get; set; } public int MaxCalls5Min { get; set; } public double MaxMemory5MinMb { get; set; }
@@ -1371,7 +1726,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 public sealed class MonitorSettings : NotifyBase
 {
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
-    private bool _autoDailyReport = true, _autoDrainEnabled = false;
+    private string _sqlServer = "", _sqlDatabase = "", _sqlUser = "", _sqlPassword = "";
+    private bool _autoDailyReport = true, _autoDrainEnabled = false, _sqlWindowsAuth = true, _autoTerminateSleeping = false;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30;
     public string RacPath { get => _racPath; set => Set(ref _racPath, value); }
@@ -1380,11 +1736,23 @@ public sealed class MonitorSettings : NotifyBase
     public string ClusterUser { get => _clusterUser; set => Set(ref _clusterUser, value); }
     public string ClusterPassword { get => _clusterPassword; set => Set(ref _clusterPassword, value); }
     public string TechLogPath { get => _techLogPath; set => Set(ref _techLogPath, value); }
+    // Подключение к серверу SQL: нужно, чтобы определить диск, на котором развернута база данных,
+    // и опрашивать очередь/нагрузку только этого диска, а не всех дисков сервера.
+    public string SqlServer { get => _sqlServer; set => Set(ref _sqlServer, value); }
+    public string SqlDatabase { get => _sqlDatabase; set => Set(ref _sqlDatabase, value); }
+    // true — проверка подлинности Windows (Integrated Security), false — логин и пароль SQL Server.
+    public bool SqlWindowsAuth { get => _sqlWindowsAuth; set => Set(ref _sqlWindowsAuth, value); }
+    public string SqlUser { get => _sqlUser; set => Set(ref _sqlUser, value); }
+    public string SqlPassword { get => _sqlPassword; set => Set(ref _sqlPassword, value); }
+    // Буквы дисков, отмеченных вручную для мониторинга ("D:"). Пустой список — автоматика (SQL или _Total).
+    public List<string> MonitorDrives { get; set; } = new();
     public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
     public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value); }
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
     public List<string> BackgroundJobsDisabledInfobases { get; set; } = new();
     public bool AutoDrainEnabled { get => _autoDrainEnabled; set => Set(ref _autoDrainEnabled, value); }
+    // Автоматически завершать все спящие сеансы при каждом опросе RAC.
+    public bool AutoTerminateSleeping { get => _autoTerminateSleeping; set => Set(ref _autoTerminateSleeping, value); }
     public decimal AutoDrainMemoryMb { get => _autoDrainMemoryMb; set => Set(ref _autoDrainMemoryMb, value); }
     public decimal AutoDrainMinutes { get => _autoDrainMinutes; set => Set(ref _autoDrainMinutes, value); }
     public decimal AutoDrainMinProcesses { get => _autoDrainMinProcesses; set => Set(ref _autoDrainMinProcesses, value); }
@@ -1401,7 +1769,7 @@ public sealed class MonitorSettings : NotifyBase
     public decimal DiskAlert { get => _diskAlert; set => Set(ref _diskAlert, value); }
     private static string FileName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor", "settings.json");
     public static MonitorSettings Load() { try { if (File.Exists(FileName)) return JsonSerializer.Deserialize<MonitorSettings>(File.ReadAllText(FileName)) ?? new(); } catch { } return new(); }
-    public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; ClusterPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; } }
+    public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; var sqlPwd = SqlPassword; ClusterPassword = ""; SqlPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; SqlPassword = sqlPwd; } }
 }
 
 public sealed class ProcessRow
@@ -1436,11 +1804,20 @@ public sealed class SessionRow
     public string Operation { get; set; } = ""; public string DbRequest { get; set; } = ""; public string Blocked { get; set; } = "нет";
 }
 public sealed record AlertRow(DateTime At, string Severity, string Source, string Message) { public string TimeText => At.ToString("dd.MM.yyyy HH:mm:ss"); }
+public sealed class DriveOption : NotifyBase
+{
+    private bool _isChecked;
+    private readonly Action _changed;
+    public DriveOption(string letter, string label, bool isChecked, Action changed) { Letter = letter; Label = label; _isChecked = isChecked; _changed = changed; }
+    public string Letter { get; }
+    public string Label { get; }
+    public bool IsChecked { get => _isChecked; set { if (Set(ref _isChecked, value)) _changed(); } }
+}
 internal sealed record RacProcess(int Pid, string ProcessUuid, double MemoryMb, double AvgCallMs, double AvgDbMs);
 internal sealed record InfoBaseRef(string Uuid, string Name, bool ScheduledJobsDenied);
 internal sealed record ConnectionLink(int Pid, string Operation, string DbRequest, string Host, string InfoBase, string Application, DateTime ConnectedAt, int ConnId);
 internal sealed class RacSnapshot { public Dictionary<int, RacProcess> Processes { get; } = new(); public Dictionary<string, InfoBaseRef> InfoBases { get; } = new(StringComparer.OrdinalIgnoreCase); public List<SessionRow> Sessions { get; } = new(); }
-internal readonly record struct DiskSnapshot(bool Available, double UsagePercent, double ReadBytesPerSec, double WriteBytesPerSec, double QueueLength);
+internal readonly record struct DiskSnapshot(bool Available, double UsagePercent, double ReadBytesPerSec, double WriteBytesPerSec, double QueueLength, string? DisksLabel = null);
 internal readonly record struct NetworkSnapshot(bool Available, double ReceiveBytesPerSec, double SendBytesPerSec, double UtilizationPercent, int InterfaceCount);
 
 internal sealed class NetworkPerformanceMonitor : IDisposable
@@ -1481,8 +1858,11 @@ internal sealed class NetworkPerformanceMonitor : IDisposable
 internal sealed class DiskPerformanceMonitor : IDisposable
 {
     private const uint PdhFmtDouble = 0x00000200;
+    private const uint PdhMoreData = 0x800007D2;
     private IntPtr _query, _usage, _read, _write, _queue;
     private bool _ready, _disposed;
+    // Буквы дисков с файлами базы данных SQL ("D:", "E:"). Пустой список — контроль всех дисков (_Total).
+    private string[] _targetDrives = Array.Empty<string>();
 
     public DiskPerformanceMonitor()
     {
@@ -1490,14 +1870,25 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         try
         {
             if (PdhOpenQuery(null, IntPtr.Zero, out _query) != 0) return;
-            if (PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\% Disk Time", IntPtr.Zero, out _usage) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Disk Read Bytes/sec", IntPtr.Zero, out _read) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Disk Write Bytes/sec", IntPtr.Zero, out _write) != 0 ||
-                PdhAddEnglishCounter(_query, @"\PhysicalDisk(_Total)\Avg. Disk Queue Length", IntPtr.Zero, out _queue) != 0) return;
+            // Счётчики добавляются по всем экземплярам PhysicalDisk ('*'), а не только по '_Total':
+            // это позволяет опрашивать именно тот диск, на котором развернута база данных SQL,
+            // без пересоздания запроса при смене настроек.
+            if (PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\% Disk Time", IntPtr.Zero, out _usage) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Disk Read Bytes/sec", IntPtr.Zero, out _read) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Disk Write Bytes/sec", IntPtr.Zero, out _write) != 0 ||
+                PdhAddEnglishCounter(_query, @"\PhysicalDisk(*)\Avg. Disk Queue Length", IntPtr.Zero, out _queue) != 0) return;
             // Первое измерение создаёт базовую точку для скоростных счётчиков.
             _ready = PdhCollectQueryData(_query) == 0;
         }
         catch { _ready = false; }
+    }
+
+    /// <summary>Ограничивает опрос дисками с указанными буквами (например "D:"). Пустой список — все диски.</summary>
+    public void SetTargetDrives(IEnumerable<string> drives)
+    {
+        _targetDrives = drives.Select(x => (x ?? "").Trim().TrimEnd('\\').ToUpperInvariant())
+            .Where(x => x.Length == 2 && x[1] == ':' && char.IsLetter(x[0]))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public DiskSnapshot Sample()
@@ -1506,19 +1897,58 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         try
         {
             if (PdhCollectQueryData(_query) != 0) return default;
-            if (!TryValue(_usage, out var usage)) return default;
-            TryValue(_read, out var read); TryValue(_write, out var write); TryValue(_queue, out var queue);
-            return new(true, Math.Clamp(usage, 0, 100), Math.Max(0, read), Math.Max(0, write), Math.Max(0, queue));
+            var usage = ReadInstances(_usage);
+            if (usage.Count == 0) return default;
+            var read = ReadInstances(_read); var write = ReadInstances(_write); var queue = ReadInstances(_queue);
+
+            // Имена экземпляров PhysicalDisk имеют вид "0 C:", "1 D: E:", "_Total".
+            // Выбираем экземпляры, содержащие буквы томов, на которых лежат файлы базы данных.
+            var matched = _targetDrives.Length == 0
+                ? new List<string>()
+                : usage.Keys.Where(name => !name.Equals("_Total", StringComparison.OrdinalIgnoreCase) &&
+                    name.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(token => _targetDrives.Contains(token, StringComparer.OrdinalIgnoreCase))).ToList();
+
+            if (matched.Count > 0)
+            {
+                var label = string.Join(", ", matched.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                var u = matched.Max(x => usage.GetValueOrDefault(x));
+                var r = matched.Sum(x => read.GetValueOrDefault(x));
+                var w = matched.Sum(x => write.GetValueOrDefault(x));
+                var q = matched.Sum(x => queue.GetValueOrDefault(x));
+                return new(true, Math.Clamp(u, 0, 100), Math.Max(0, r), Math.Max(0, w), Math.Max(0, q), label);
+            }
+
+            // Диск базы не задан или экземпляр не найден — прежнее поведение: суммарный '_Total'.
+            var totalUsage = usage.TryGetValue("_Total", out var tu) ? tu : usage.Values.Max();
+            var totalRead = read.TryGetValue("_Total", out var tr) ? tr : read.Values.Sum();
+            var totalWrite = write.TryGetValue("_Total", out var tw) ? tw : write.Values.Sum();
+            var totalQueue = queue.TryGetValue("_Total", out var tq) ? tq : queue.Values.Sum();
+            return new(true, Math.Clamp(totalUsage, 0, 100), Math.Max(0, totalRead), Math.Max(0, totalWrite), Math.Max(0, totalQueue));
         }
         catch { return default; }
     }
 
-    private static bool TryValue(IntPtr counter, out double value)
+    private static Dictionary<string, double> ReadInstances(IntPtr counter)
     {
-        value = 0; if (counter == IntPtr.Zero) return false;
-        var result = PdhGetFormattedCounterValue(counter, PdhFmtDouble, out _, out var formatted);
-        if (result != 0 || formatted.CStatus != 0 || double.IsNaN(formatted.DoubleValue) || double.IsInfinity(formatted.DoubleValue)) return false;
-        value = formatted.DoubleValue; return true;
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        if (counter == IntPtr.Zero) return result;
+        uint size = 0, count = 0;
+        if (PdhGetFormattedCounterArray(counter, PdhFmtDouble, ref size, ref count, IntPtr.Zero) != PdhMoreData || size == 0) return result;
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            if (PdhGetFormattedCounterArray(counter, PdhFmtDouble, ref size, ref count, buffer) != 0) return result;
+            var itemSize = Marshal.SizeOf<PdhFmtCounterValueItem>();
+            for (var i = 0; i < count; i++)
+            {
+                var item = Marshal.PtrToStructure<PdhFmtCounterValueItem>(IntPtr.Add(buffer, i * itemSize));
+                if (item.Value.CStatus != 0 || double.IsNaN(item.Value.DoubleValue) || double.IsInfinity(item.Value.DoubleValue)) continue;
+                var name = Marshal.PtrToStringUni(item.Name);
+                if (!string.IsNullOrWhiteSpace(name)) result[name] = item.Value.DoubleValue;
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+        return result;
     }
 
     public void Dispose()
@@ -1533,10 +1963,16 @@ internal sealed class DiskPerformanceMonitor : IDisposable
         [FieldOffset(0)] public uint CStatus;
         [FieldOffset(8)] public double DoubleValue;
     }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PdhFmtCounterValueItem
+    {
+        public IntPtr Name;       // LPWSTR szName
+        public PdhFmtCounterValue Value;
+    }
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhOpenQuery(string? dataSource, IntPtr userData, out IntPtr query);
     [DllImport("pdh.dll", CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")] private static extern uint PdhAddEnglishCounter(IntPtr query, string path, IntPtr userData, out IntPtr counter);
     [DllImport("pdh.dll")] private static extern uint PdhCollectQueryData(IntPtr query);
-    [DllImport("pdh.dll")] private static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, out uint type, out PdhFmtCounterValue value);
+    [DllImport("pdh.dll", EntryPoint = "PdhGetFormattedCounterArrayW")] private static extern uint PdhGetFormattedCounterArray(IntPtr counter, uint format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
     [DllImport("pdh.dll")] private static extern uint PdhCloseQuery(IntPtr query);
 }
 

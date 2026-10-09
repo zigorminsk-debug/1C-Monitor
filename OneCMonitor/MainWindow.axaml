@@ -26,11 +26,11 @@
             <Border Grid.Column="4" Classes="card"><StackPanel><TextBlock Text="ТРЕВОГИ" Classes="muted"/><TextBlock Text="{Binding AlertCount}" Classes="h1" Foreground="#FB7185"/><TextBlock Text="требуют внимания" Classes="muted"/></StackPanel></Border>
           </Grid>
           <Border Classes="card">
-            <Grid ColumnDefinitions="180,180,*,160" ColumnSpacing="18">
+            <Grid ColumnDefinitions="180,200,*,Auto" ColumnSpacing="18">
               <StackPanel><TextBlock Text="НАГРУЗКА НА ДИСК" Classes="muted"/><TextBlock Text="{Binding DiskUsageText}" Classes="h1"/></StackPanel>
-              <StackPanel Grid.Column="1"><TextBlock Text="ОЧЕРЕДЬ" Classes="muted"/><TextBlock Text="{Binding DiskQueueText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
-              <StackPanel Grid.Column="2"><TextBlock Text="СКОРОСТЬ ВВОДА-ВЫВОДА" Classes="muted"/><TextBlock Text="{Binding DiskIoText}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
-              <TextBlock Grid.Column="3" Text="PhysicalDisk (_Total)" Classes="muted" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+              <StackPanel Grid.Column="1"><TextBlock Text="ОЧЕРЕДЬ" Classes="muted"/><TextBlock Text="{Binding DiskQueueText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" ToolTip.Tip="{Binding DiskScopeText}"/></StackPanel>
+              <StackPanel Grid.Column="2"><TextBlock Text="СКОРОСТЬ ВВОДА-ВЫВОДА" Classes="muted"/><TextBlock Text="{Binding DiskIoText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/></StackPanel>
+              <TextBlock Grid.Column="3" Text="{Binding DiskScopeText}" Classes="muted" VerticalAlignment="Center" HorizontalAlignment="Right" TextWrapping="Wrap" MaxWidth="260" TextAlignment="Right" ToolTip.Tip="{Binding ManualDiskStatus}"/>
             </Grid>
           </Border>
           <Border Classes="card">
@@ -120,6 +120,9 @@
               <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10"/>
             </WrapPanel>
             <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются." Classes="muted" TextWrapping="Wrap"/>
+            <ToggleSwitch IsChecked="{Binding AutoTerminateSleepingEnabled}" OnContent="Завершать спящие сеансы автоматически — включено" OffContent="Завершать спящие сеансы автоматически — выключено"/>
+            <TextBlock Text="{Binding AutoSleepStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            <TextBlock Text="При включении все спящие сеансы завершаются сразу при каждом опросе RAC, без контрольной фразы. Настройка сохраняется и действует после перезапуска программы." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Фоновые и регламентные задания" FontSize="17" FontWeight="SemiBold"/>
@@ -154,6 +157,34 @@
               <TextBlock Grid.Row="6" Text="Тайм-аут RAC, сек." VerticalAlignment="Center"/><NumericUpDown Grid.Row="6" Grid.Column="1" Value="{Binding Settings.RacTimeoutSeconds}" Minimum="15" Maximum="300" Increment="15"/>
             </Grid>
             <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сохранить и проверить" Command="{Binding SaveSettingsCommand}"/><Button Content="Запустить RAS" Command="{Binding StartRasCommand}"/><TextBlock Text="{Binding RacStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="400" TextWrapping="Wrap" ToolTip.Tip="{Binding Settings.RacPath}"/></StackPanel>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Подключение к серверу SQL — диск базы данных" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Укажите сервер СУБД, чтобы очередь и нагрузка диска опрашивались только по диску, на котором развернута база данных (определяется по sys.master_files). Без подключения используется суммарный счётчик всех физических дисков (_Total)." Classes="muted" TextWrapping="Wrap"/>
+            <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+              <TextBlock Text="Сервер SQL" VerticalAlignment="Center"/><TextBox Grid.Column="1" Text="{Binding Settings.SqlServer}" Watermark="Например localhost или SERVER\INSTANCE"/>
+              <TextBlock Grid.Row="1" Text="База данных" VerticalAlignment="Center"/><TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Settings.SqlDatabase}" Watermark="Пусто — все пользовательские базы"/>
+              <TextBlock Grid.Row="2" Text="Авторизация" VerticalAlignment="Center"/><CheckBox Grid.Row="2" Grid.Column="1" IsChecked="{Binding Settings.SqlWindowsAuth}" Content="Учётные данные Windows (пользователь, от которого запущен монитор)"/>
+              <TextBlock Grid.Row="3" Text="Пользователь SQL" VerticalAlignment="Center"/><TextBox Grid.Row="3" Grid.Column="1" Text="{Binding Settings.SqlUser}" IsEnabled="{Binding !Settings.SqlWindowsAuth}" Watermark="Например sa — только при выключенной галочке Windows"/>
+              <TextBlock Grid.Row="4" Text="Пароль SQL" VerticalAlignment="Center"/><TextBox Grid.Row="4" Grid.Column="1" Text="{Binding Settings.SqlPassword}" IsEnabled="{Binding !Settings.SqlWindowsAuth}" PasswordChar="●" Watermark="Не сохраняется на диск, вводится после перезапуска"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <Button Content="Проверить соединение и сохранить" Command="{Binding TestSqlConnectionCommand}"/>
+              <TextBlock Text="{Binding SqlDiskStatus}" Foreground="#60A5FA" VerticalAlignment="Center" MaxWidth="440" TextWrapping="Wrap"/>
+            </StackPanel>
+            <TextBlock Text="Диск базы также перепроверяется автоматически каждые 5 минут." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Диски для мониторинга" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Отметьте диски, по которым считать очередь и нагрузку. Ручной выбор имеет приоритет над диском, найденным через SQL. Если ничего не отмечено — используется диск базы данных SQL, а без подключения SQL — суммарно все физические диски (_Total)." Classes="muted" TextWrapping="Wrap"/>
+            <ItemsControl ItemsSource="{Binding MonitorDriveOptions}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate><DataTemplate>
+                <CheckBox IsChecked="{Binding IsChecked}" Content="{Binding Label}" Margin="0,0,18,4"/>
+              </DataTemplate></ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Text="{Binding ManualDiskStatus}" Foreground="#60A5FA" TextWrapping="Wrap"/>
+            <TextBlock Text="Выбор сохраняется и применяется сразу, без кнопки «Сохранить»." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автоматический суточный отчёт" FontSize="17" FontWeight="SemiBold"/>
