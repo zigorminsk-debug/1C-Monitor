@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" x:Class="OneCMonitor.MainWindow" Title="{Binding WindowTitle}" Icon="/Assets/app.ico" Width="1450" Height="900" MinWidth="1050" MinHeight="680" mc:Ignorable="d">
   <Grid RowDefinitions="138,*,72">
     <Border Grid.Row="0" Background="#111A29" BorderBrush="#273449" BorderThickness="0,0,0,1" Padding="20,10">
-      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="12">
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="12">
         <Border Background="#263B22" CornerRadius="8" Padding="11,7" VerticalAlignment="Center"><TextBlock Text="1C" Foreground="#FACC15" FontSize="20" FontWeight="Bold"/></Border>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
           <TextBlock Text="{Binding ServerHeaderTitle}" FontWeight="SemiBold" FontSize="24"/>
@@ -11,6 +11,7 @@
         <Button Grid.Column="3" Content="Обновить" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
         <Button Grid.Column="4" Content="Отчёт HTML" Command="{Binding ExportCommand}" VerticalAlignment="Center"/>
         <ToggleSwitch Grid.Column="5" IsChecked="{Binding IsRunning}" OnContent="Мониторинг" OffContent="Пауза" VerticalAlignment="Center"/>
+        <Button Grid.Column="6" Content="Выход" Command="{Binding ExitCommand}" VerticalAlignment="Center" Background="#7F1D1D" ToolTip.Tip="Остановить мониторинг, завершить запущенные монитором процессы и закрыть программу"/>
       </Grid>
     </Border>
 

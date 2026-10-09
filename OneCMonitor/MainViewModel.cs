@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -37,8 +38,20 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public ICommand RestartOneCServicesCommand { get; }
     public ICommand KillAllRphostCommand { get; }
     public ICommand GracefulTurnOffCommand { get; }
+    public ICommand ExitCommand { get; }
+
+    /// <summary>Спрашивает подтверждение выхода в слое UI. null — выходить без вопроса (закрытие крестиком).</summary>
+    public Func<Task<bool>>? ExitConfirmation { get; set; }
+
+    /// <summary>Поднимается один раз, когда мониторинг останавливается и программа закрывается.</summary>
+    public event Action<int>? ExitRequested;
 
     private readonly CancellationTokenSource _stop = new();
+    /// <summary>Процессы, запущенные самим монитором (rac.exe, powershell.exe, ras.exe). Завершаются при выходе.</summary>
+    private readonly ConcurrentDictionary<int, Process> _childProcesses = new();
+    private Task? _monitorLoop;
+    private int _exitStarted;
+    private int _confirming;
     private readonly Dictionary<int, CpuSample> _cpu = new();
     private readonly List<HistoryRow> _history = new();
     private readonly List<ServerHistoryRow> _serverHistory = new();
@@ -92,10 +105,10 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         RestartOneCServicesCommand = new RelayCommand(async () => await RestartOneCServicesAsync());
         KillAllRphostCommand = new RelayCommand(async () => await KillAllRphostAsync());
         GracefulTurnOffCommand = new RelayCommand(async () => await GracefulTurnOffSelectedAsync());
+        ExitCommand = new RelayCommand(async () => await ExitAsync());
         if (string.IsNullOrWhiteSpace(Settings.ReportFolder)) Settings.ReportFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "1CServerMonitor", "Reports");
         UpdateServerHeader(null, default, default);
-        _ = LoadPhysicalDiskInfoAsync();
-        _ = LoopAsync();
+        _monitorLoop = Task.WhenAll(LoadPhysicalDiskInfoAsync(), LoopAsync());
     }
 
     public bool IsRunning { get => _isRunning; set { Set(ref _isRunning, value); Status = value ? "Мониторинг включён" : "Мониторинг на паузе"; StatusColor = value ? Brushes.LightGreen : Brushes.Goldenrod; } }
@@ -124,6 +137,91 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string DiskQueueText { get => _diskQueueText; private set => Set(ref _diskQueueText, value); }
     public string SessionBreakdownText { get => _sessionBreakdownText; private set => Set(ref _sessionBreakdownText, value); }
     public string LogText { get => _logText; private set => Set(ref _logText, value); }
+
+    // ========================= ЗАВЕРШЕНИЕ РАБОТЫ =========================
+    // Кнопка «Выход» и закрытие окна крестиком проходят через один и тот же код:
+    // мониторинг останавливается, запущенные монитором процессы завершаются,
+    // затем Avalonia закрывает окно и процесс программы завершается.
+
+    /// <summary>Останавливает мониторинг и закрывает программу. Повторные нажатия игнорируются.</summary>
+    private async Task ExitAsync()
+    {
+        if (_exitStarted != 0 || _confirming != 0) return; // уже выходим или диалог подтверждения открыт
+        if (ExitConfirmation != null)
+        {
+            _confirming = 1;
+            bool confirmed;
+            try { confirmed = await ExitConfirmation(); }
+            catch (Exception ex) { _confirming = 0; Log("Не удалось показать подтверждение выхода: " + ex.Message); return; }
+            _confirming = 0;
+            if (!confirmed) { Log("Выход отменён: мониторинг продолжается."); return; }
+        }
+        if (!BeginShutdown("кнопка «Выход»")) return;
+        try
+        {
+            await WaitForBackgroundWorkAsync();
+            try { Settings.Save(); }
+            catch (Exception ex) { Log("Не удалось сохранить настройки при выходе: " + ex.Message); }
+            TerminateChildProcesses();
+            _disk.Dispose(); _network.Dispose();
+            Log("Мониторинг остановлен, запущенные монитором процессы завершены. Программа закрывается.");
+        }
+        catch (Exception ex) { Log("Ошибка при завершении работы: " + ex.Message); }
+        ExitRequested?.Invoke(0);
+        // Страховка: если диспетчер Avalonia или зависший rac.exe не отпустят процесс,
+        // завершаемся принудительно, чтобы монитор не остался висеть в памяти.
+        _ = Task.Run(async () => { await Task.Delay(4000); Environment.Exit(0); });
+    }
+
+    /// <summary>Флаг остановки: true только при первом вызове, повторные вызовы — false.</summary>
+    private bool BeginShutdown(string reason)
+    {
+        if (Interlocked.Exchange(ref _exitStarted, 1) == 1) return false;
+        _stop.Cancel();
+        IsRunning = false;
+        Status = "Остановка мониторинга…";
+        StatusColor = Brushes.Goldenrod;
+        Log("Остановка мониторинга: " + reason);
+        return true;
+    }
+
+    private async Task WaitForBackgroundWorkAsync()
+    {
+        var loop = _monitorLoop;
+        if (loop == null || loop.IsCompleted) return;
+        // Текущее измерение может ждать rac.exe до тайм-аута, поэтому ждём ограниченно.
+        await Task.WhenAny(loop, Task.Delay(2500));
+    }
+
+    /// <summary>Завершает все процессы, которые монитор запустил сам (rac.exe, powershell.exe, ras.exe).</summary>
+    private void TerminateChildProcesses()
+    {
+        var stopped = new List<string>();
+        foreach (var item in _childProcesses)
+        {
+            try
+            {
+                if (item.Value.HasExited) continue;
+                item.Value.Kill(true);
+                stopped.Add(item.Value.WaitForExit(1500) ? Describe(item.Value) : Describe(item.Value) + " — не завершился за 1,5 с");
+            }
+            catch (Exception ex) { Log($"Не удалось завершить запущенный монитором процесс PID {item.Key}: {ex.Message}"); }
+            finally { _childProcesses.TryRemove(item.Key, out _); }
+        }
+        if (stopped.Count > 0) Log("Завершены процессы, запущенные монитором: " + string.Join(", ", stopped));
+    }
+
+    private static string Describe(Process process)
+    {
+        try { return $"{process.ProcessName} (PID {process.Id})"; }
+        catch { return "процесс монитора"; }
+    }
+
+    private void TrackChild(Process process)
+    {
+        try { _childProcesses[process.Id] = process; }
+        catch { }
+    }
 
     private void OpenUri(string uri)
     {
@@ -353,7 +451,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             CheckAutomaticDailyReport(now);
             if (manual) Log($"Ручное обновление: rphost={local.Count}, сеансы={sessions.Count}");
         }
-        catch (Exception ex) { Status = "Ошибка мониторинга"; StatusColor = Brushes.LightCoral; Log(ex.ToString()); }
+        catch (Exception ex)
+        {
+            // При выходе текущее измерение обрывается намеренно — не показываем это как ошибку мониторинга.
+            if (_stop.IsCancellationRequested) { Log("Измерение прервано остановкой мониторинга: " + ex.Message); return; }
+            Status = "Ошибка мониторинга"; StatusColor = Brushes.LightCoral; Log(ex.ToString());
+        }
         finally { _busy = false; }
     }
 
@@ -870,20 +973,26 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         }
     }
 
-    private static async Task<string> RunAsync(string exe, IEnumerable<string> args, int timeoutSeconds = 15)
+    private async Task<string> RunAsync(string exe, IEnumerable<string> args, int timeoutSeconds = 15)
     {
         // Не используем StandardOutput.ReadToEndAsync(): StreamReader декодирует поток
         // до того, как можно определить фактическую кодировку rac.exe.
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi) ?? throw new Exception("Не удалось запустить rac.exe");
-        var stdout = ReadBytesAsync(p.StandardOutput.BaseStream);
-        var stderr = ReadBytesAsync(p.StandardError.BaseStream);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        try { await p.WaitForExitAsync(cts.Token); } catch { try { p.Kill(true); } catch { } throw new Exception($"Превышено время ожидания {Path.GetFileName(exe)}: {timeoutSeconds} с"); }
-        var o = DecodeRac(await stdout); var e = DecodeRac(await stderr);
-        if (p.ExitCode != 0) throw new Exception(string.IsNullOrWhiteSpace(e) ? $"RAC завершился с кодом {p.ExitCode}" : e.Trim());
-        return o;
+        // Запоминаем процесс: кнопка «Выход» завершает все процессы, запущенные монитором.
+        TrackChild(p); var pid = p.Id;
+        try
+        {
+            var stdout = ReadBytesAsync(p.StandardOutput.BaseStream);
+            var stderr = ReadBytesAsync(p.StandardError.BaseStream);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            try { await p.WaitForExitAsync(cts.Token); } catch { try { p.Kill(true); } catch { } throw new Exception($"Превышено время ожидания {Path.GetFileName(exe)}: {timeoutSeconds} с"); }
+            var o = DecodeRac(await stdout); var e = DecodeRac(await stderr);
+            if (p.ExitCode != 0) throw new Exception(string.IsNullOrWhiteSpace(e) ? $"RAC завершился с кодом {p.ExitCode}" : e.Trim());
+            return o;
+        }
+        finally { _childProcesses.TryRemove(pid, out _); }
     }
 
     private static async Task<byte[]> ReadBytesAsync(Stream input)
@@ -956,6 +1065,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var psi = new ProcessStartInfo(ras) { UseShellExecute = false, CreateNoWindow = true };
             psi.ArgumentList.Add("cluster"); psi.ArgumentList.Add($"--port={port}"); psi.ArgumentList.Add(Settings.AgentEndpoint);
             var rasProcess = Process.Start(psi) ?? throw new Exception("Не удалось запустить ras.exe");
+            TrackChild(rasProcess); // ras.exe, поднятый монитором, закрывается вместе с ним
             RacStatus = $"RAS запускается: {ras} → {Settings.AgentEndpoint}, порт {port}…";
             Log(RacStatus);
 
@@ -1203,7 +1313,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private void Log(string text)
     {
-        Dispatcher.UIThread.Post(() => { _log.AppendLine($"[{DateTime.Now:dd.MM.yyyy HH:mm:ss}] {text}"); if (_log.Length > 100000) _log.Remove(0, 20000); LogText = _log.ToString(); });
+        // При закрытии программы диспетчер Avalonia может быть уже остановлен — не роняем на этом выход.
+        try { Dispatcher.UIThread.Post(() => { _log.AppendLine($"[{DateTime.Now:dd.MM.yyyy HH:mm:ss}] {text}"); if (_log.Length > 100000) _log.Remove(0, 20000); LogText = _log.ToString(); }); }
+        catch { }
     }
     private static List<Record> ParseRecords(string text)
     {
@@ -1234,7 +1346,13 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private static string F(double value) => value.ToString("0.00", CultureInfo.InvariantCulture);
     private static string Csv(string s) => "\"" + (s ?? "").Replace("\"", "\"\"") + "\"";
     private static void Replace<T>(ObservableCollection<T> target, IEnumerable<T> src) { target.Clear(); foreach (var x in src) target.Add(x); }
-    public void Dispose() { _stop.Cancel(); _disk.Dispose(); _network.Dispose(); }
+    public void Dispose()
+    {
+        // Закрытие окна крестиком или остановка Avalonia идут тем же путём, что и кнопка «Выход».
+        BeginShutdown("закрытие окна");
+        TerminateChildProcesses();
+        _disk.Dispose(); _network.Dispose();
+    }
     private record CpuSample(DateTime At, TimeSpan Total);
     private record HistoryRow(DateTime At, int Pid, double Cpu, double MemoryMb, int Sessions, string Users, int Risk, string Diagnosis, double DiskUsage, double DiskRead, double DiskWrite, double DiskQueue, double NetworkReceive, double NetworkSend, double NetworkUsage);
     private record ServerHistoryRow(DateTime At, double Cpu, double RamMb, double DiskUsage, double DiskRead, double DiskWrite, double DiskQueue, double NetIn, double NetOut, double NetUsage, int Sessions, int ActiveSessions, int SleepingSessions);
