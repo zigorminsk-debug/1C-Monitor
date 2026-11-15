@@ -78,6 +78,9 @@ func main() {
 		messages.file = file
 	}
 	log.SetOutput(messages)
+	if library := openGLLibrary(); library != "" {
+		log.Printf("OpenGL: библиотека %s", library)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic: %v\n%s", r, debug.Stack())

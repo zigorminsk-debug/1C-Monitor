@@ -178,7 +178,7 @@ jobs:
 
       - name: Run without Mesa
         shell: pwsh
-        run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\system-opengl.png -Report
+        run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\1-system-opengl.png -Report -Note 'без Mesa3D'
 
       - name: Download Mesa3D
         shell: pwsh
@@ -188,15 +188,40 @@ jobs:
           $release = Invoke-RestMethod https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
           $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-[\d.]+-release-msvc\.7z$' } | Select-Object -First 1
           if (-not $asset) { throw "архив Mesa3D не найден: $($release.assets.name -join ', ')" }
-          Write-Host "Mesa3D: $($asset.name)"
           Invoke-WebRequest $asset.browser_download_url -OutFile mesa.7z
           7z x mesa.7z -omesa -y | Out-Null
-          Get-ChildItem mesa\x64\*.dll | ForEach-Object { Write-Host $_.Name }
-          Copy-Item mesa\x64\*.dll app\
+          $names = (Get-ChildItem mesa\x64 -File | ForEach-Object { $_.Name }) -join ', '
+          Write-Host "::notice title=Mesa3D::$($asset.name); x64: $names"
+          if (-not (Test-Path mesa\x64\opengl32.dll)) { throw 'в архиве нет x64\opengl32.dll' }
 
-      - name: Run with Mesa
+      # Варианты подключения Mesa3D проверяются по очереди; результат каждого — в аннотации.
+      - name: Mesa beside the program
         shell: pwsh
-        run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\mesa.png
+        run: |
+          foreach ($name in 'opengl32.dll', 'libgallium_wgl.dll', 'libglapi.dll', 'dxil.dll') {
+            if (Test-Path "mesa\x64\$name") { Copy-Item "mesa\x64\$name" app\ }
+          }
+          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\2-mesa-beside.png -Report -Note 'Mesa3D рядом с программой'
+
+      - name: Mesa beside the program, llvmpipe
+        shell: pwsh
+        env:
+          GALLIUM_DRIVER: llvmpipe
+        run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\3-mesa-llvmpipe.png -Report -Note 'Mesa3D рядом с программой, GALLIUM_DRIVER=llvmpipe'
+
+      - name: Mesa beside the program, .local
+        shell: pwsh
+        run: |
+          Set-Content app\1C-Server-Monitor-Go.exe.local 'dummy'
+          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\4-mesa-local.png -Report -Note 'Mesa3D рядом с программой и файл .local'
+
+      - name: Mesa system-wide
+        shell: pwsh
+        run: |
+          Remove-Item app\*.dll, app\*.local
+          cmd /c "mesa\systemwidedeploy.cmd 1"
+          $installed = (Get-ChildItem $env:windir\System32\mesadrv.dll, $env:windir\System32\libgallium_wgl.dll -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
+          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\5-mesa-system.png -Report -Note "Mesa3D установлена в систему (systemwidedeploy.cmd 1); в System32: $installed"
 
       # Снимки экрана — вспомогательные: их отсутствие не делает сборку неудачной.
       - name: Upload screenshots

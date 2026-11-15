@@ -8,3 +8,5 @@ import (
 )
 
 func showError(title, text string) { fmt.Fprintln(os.Stderr, title+": "+text) }
+
+func openGLLibrary() string { return "" }

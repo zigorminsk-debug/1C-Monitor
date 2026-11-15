@@ -1,6 +1,6 @@
 # Запускает программу, ждёт главное окно, делает снимок экрана и завершает её.
 # С ключом -Report ничего не требует: только сообщает, что получилось (запуск без OpenGL 2.1).
-param([string]$Exe, [string]$Shot, [switch]$Report, [int]$Seconds = 25)
+param([string]$Exe, [string]$Shot, [switch]$Report, [int]$Seconds = 25, [string]$Note = '')
 
 $ErrorActionPreference = 'Stop'
 
@@ -55,7 +55,8 @@ if (Test-Path (Join-Path $data 'interface.log')) { $log = Get-Content (Join-Path
 # Сведения дублируются в аннотацию запуска: журнал шага доступен не всем инструментам.
 $tail = (($log -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 12) -join '%0A') -replace "`r", ''
 if ($tail.Length -gt 1500) { $tail = $tail.Substring($tail.Length - 1500) }
-Write-Host "::notice title=$(Split-Path $Shot -Leaf)::$facts%0A$tail"
+$files = (Get-ChildItem (Split-Path $Exe) -File | ForEach-Object { $_.Name }) -join ', '
+Write-Host "::notice title=$(Split-Path $Shot -Leaf)::$Note%0A$facts%0Aфайлы рядом с программой: $files%0A$tail"
 $noOpenGL = $log -match 'window creation error|failed to initialise GLFW'
 if ($Report) {
     if ($noOpenGL) { Write-Host 'Итог: системный OpenGL не подходит, программа показала сообщение об ошибке (ожидаемо без видеодрайвера).' }

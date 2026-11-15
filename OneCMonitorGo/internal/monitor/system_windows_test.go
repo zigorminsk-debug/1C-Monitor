@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 func ownProcess(t *testing.T, all []ProcInfo) ProcInfo {
@@ -147,11 +149,6 @@ func TestWindowsSystem(t *testing.T) {
 	if !regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`).MatchString(version) || s.FileVersion(file+".missing") != "?" {
 		t.Errorf("версия файла: %q", version)
 	}
-	services, installed := s.ServiceImagePaths(), s.InstalledOneCLocations()
-	t.Logf("служб с путём к образу: %d, установок 1С в реестре: %d", len(services), len(installed))
-	if len(services) < 20 {
-		t.Errorf("служб найдено %d: чтение реестра служб не работает", len(services))
-	}
 	for name, dir := range map[string]string{"документы": s.DocumentsDir(), "рабочий стол": s.DesktopDir(), "программа": s.ExecutableDir()} {
 		t.Logf("каталог «%s»: %s", name, dir)
 		if !filepath.IsAbs(dir) {
@@ -163,6 +160,74 @@ func TestWindowsSystem(t *testing.T) {
 	}
 	if dir := DefaultDataDir(); !strings.Contains(strings.ToLower(dir), `appdata\local\1cservermonitor`) {
 		t.Errorf("каталог данных: %s", dir)
+	}
+}
+
+// TestWindowsRegistrySearch проверяет поиск сервера 1С по реестру на настоящей системе: создаёт
+// службу ragent и запись об установленной программе (нужны права администратора), рядом кладёт
+// файлы rac.exe и ras.exe и ожидает, что монитор найдёт именно этот rac.exe.
+func TestWindowsRegistrySearch(t *testing.T) {
+	s := NewSystem()
+	defer s.Close()
+	bin := filepath.Join(t.TempDir(), "1cv8", "8.3.99.1", "bin")
+	location := filepath.Join(t.TempDir(), "1cv8 other", "8.3.99.2")
+	for _, dir := range []string{bin, filepath.Join(location, "bin")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"rac.exe", "ras.exe"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("MZ"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	create := func(path string, values map[string]string) {
+		t.Helper()
+		// Представление реестра — собственное для сборки (у 32-битной это WOW6432Node): монитор
+		// читает оба, а удалить раздел после теста можно тем же простым вызовом.
+		key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, path, registry.SET_VALUE)
+		if err != nil {
+			t.Skipf("раздел HKLM\\%s не создан (нужны права администратора): %v", path, err)
+		}
+		t.Cleanup(func() { _ = registry.DeleteKey(registry.LOCAL_MACHINE, path) })
+		defer key.Close()
+		for name, value := range values {
+			if err := key.SetStringValue(name, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	create(`SYSTEM\CurrentControlSet\Services\OneCMonitorTestAgent`, map[string]string{
+		"ImagePath": `"` + filepath.Join(bin, "ragent.exe") + `" -srvc -agent -regport 1541 -port 1540 -range 1560:1591 -d "C:\srvinfo"`,
+	})
+	create(`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneCMonitorTest`, map[string]string{
+		"DisplayName": "1C:Enterprise 8 (x86-64) (8.3.99.2)", "InstallLocation": location + `\`,
+	})
+
+	services, installed := s.ServiceImagePaths(), s.InstalledOneCLocations()
+	t.Logf("службы ragent: %q", services)
+	t.Logf("установки 1С: %q", installed)
+	if len(services) != 1 || !strings.Contains(services[0], filepath.Join(bin, "ragent.exe")) {
+		t.Errorf("служба ragent из реестра не найдена: %q", services)
+	}
+	foundLocation := false
+	for _, dir := range installed {
+		foundLocation = foundLocation || strings.EqualFold(strings.TrimRight(dir, `\`), location)
+	}
+	if !foundLocation {
+		t.Errorf("каталог установки %s не найден: %q", location, installed)
+	}
+	candidates := FindRacExecutables(s, "")
+	t.Logf("найденные rac.exe: %q", candidates)
+	if len(candidates) < 2 || !strings.EqualFold(candidates[0], filepath.Join(bin, "rac.exe")) {
+		t.Errorf("первым должен быть rac.exe из каталога службы ragent: %q", candidates)
+	}
+	second := false
+	for _, candidate := range candidates {
+		second = second || strings.EqualFold(candidate, filepath.Join(location, "bin", "rac.exe"))
+	}
+	if !second {
+		t.Errorf("rac.exe из каталога установленной программы не найден: %q", candidates)
 	}
 }
 
