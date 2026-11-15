@@ -21,7 +21,8 @@ for ($i = 0; $i -lt $Seconds; $i++) {
     if ((Test-MainWindow $title) -and $i -ge 8) { break }
 }
 $alive = -not $process.HasExited
-Write-Host "процесс работает: $alive; заголовок окна: «$title»"
+$facts = "процесс работает: $alive; заголовок окна: «$title»"
+Write-Host $facts
 
 New-Item -ItemType Directory -Force (Split-Path $Shot) | Out-Null
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -38,6 +39,7 @@ try {
             if ($c.R -lt 0x40 -and $c.G -lt 0x50 -and $c.B -lt 0x70 -and $c.B -gt $c.R) { $dark++ }
         }
     }
+    $facts += "; экран $($bounds.Width)x$($bounds.Height), точек в цветах программы: $dark из $samples"
     Write-Host "экран $($bounds.Width)x$($bounds.Height); точек в цветах программы: $dark из $samples"
 } catch {
     Write-Host "снимок экрана не получен: $_"
@@ -50,6 +52,10 @@ foreach ($name in 'interface.log', 'crash.log') {
 }
 $log = ''
 if (Test-Path (Join-Path $data 'interface.log')) { $log = Get-Content (Join-Path $data 'interface.log') -Raw -Encoding UTF8 }
+# Сведения дублируются в аннотацию запуска: журнал шага доступен не всем инструментам.
+$tail = (($log -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 12) -join '%0A') -replace "`r", ''
+if ($tail.Length -gt 1500) { $tail = $tail.Substring($tail.Length - 1500) }
+Write-Host "::notice title=$(Split-Path $Shot -Leaf)::$facts%0A$tail"
 $noOpenGL = $log -match 'window creation error|failed to initialise GLFW'
 if ($Report) {
     if ($noOpenGL) { Write-Host 'Итог: системный OpenGL не подходит, программа показала сообщение об ошибке (ожидаемо без видеодрайвера).' }

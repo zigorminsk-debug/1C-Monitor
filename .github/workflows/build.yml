@@ -41,6 +41,7 @@ jobs:
           name: 1C-Server-Monitor-${{ matrix.rid }}
           path: publish/${{ matrix.rid }}
           if-no-files-found: error
+          retention-days: 7
 
   # Версия на Go + Fyne (каталог OneCMonitorGo).
   go-build:
@@ -85,12 +86,21 @@ jobs:
       - name: Check executables
         run: python3 ../.github/scripts/check_exe.py ../OneCServerMonitorGo-win-x64/1C-Server-Monitor-Go.exe ../OneCServerMonitorGo-win-x86/1C-Server-Monitor-Go.exe
 
+      # Передача программы заданию «запуск окна» не зависит от хранилища артефактов.
+      - name: Save build for the GUI job
+        uses: actions/cache/save@v4
+        with:
+          path: OneCServerMonitorGo-win-x64
+          key: go-gui-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+
       - name: Upload win-x64
         uses: actions/upload-artifact@v4
         with:
           name: 1C-Server-Monitor-Go-win-x64
           path: OneCServerMonitorGo-win-x64
           if-no-files-found: error
+          retention-days: 7
 
       - name: Upload win-x86
         uses: actions/upload-artifact@v4
@@ -98,6 +108,7 @@ jobs:
           name: 1C-Server-Monitor-Go-win-x86
           path: OneCServerMonitorGo-win-x86
           if-no-files-found: error
+          retention-days: 7
 
   # Вызовы Windows API проверяются на настоящей Windows для обеих разрядностей.
   go-windows-test:
@@ -123,40 +134,47 @@ jobs:
           go-version: "1.27.x"
           cache-dependency-path: OneCMonitorGo/go.sum
 
+      # Вывод тестов дублируется в аннотации запуска (скрипт go_test_report.py).
       - name: Test monitor (Windows API)
-        run: go test -count=1 -v ./internal/monitor
+        shell: bash
+        run: |
+          code=0
+          go test -json -count=1 -v ./internal/monitor > test-monitor.json 2> test-monitor.err || code=$?
+          cat test-monitor.err
+          python ../.github/scripts/go_test_report.py test-monitor.json
+          exit $code
 
       - name: Test window (шрифты Windows, программный рендерер)
-        if: matrix.arch == 'amd64'
-        shell: pwsh
+        if: matrix.arch == 'amd64' && !cancelled()
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force screenshots | Out-Null
-          $env:SCREENSHOT_DIR = (Resolve-Path screenshots).Path
-          go test -count=1 -v ./internal/ui
-
-      - name: Upload screenshots
-        if: matrix.arch == 'amd64' && always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-screenshots-windows
-          path: OneCMonitorGo/screenshots
-          if-no-files-found: warn
+          code=0
+          go test -json -count=1 -v ./internal/ui > test-ui.json 2> test-ui.err || code=$?
+          cat test-ui.err
+          python ../.github/scripts/go_test_report.py test-ui.json
+          exit $code
 
   # Запуск собранной программы на Windows: без OpenGL и с программным OpenGL (Mesa3D).
   go-gui:
     name: Go + Fyne · запуск окна на Windows
     needs: go-build
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download win-x64
-        uses: actions/download-artifact@v4
+      - name: Restore build
+        uses: actions/cache/restore@v4
         with:
-          name: 1C-Server-Monitor-Go-win-x64
-          path: app
+          path: OneCServerMonitorGo-win-x64
+          key: go-gui-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Copy build
+        shell: pwsh
+        run: Copy-Item OneCServerMonitorGo-win-x64 app -Recurse
 
       - name: Run without Mesa
         shell: pwsh
@@ -180,13 +198,16 @@ jobs:
         shell: pwsh
         run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\mesa.png
 
+      # Снимки экрана — вспомогательные: их отсутствие не делает сборку неудачной.
       - name: Upload screenshots
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: go-gui-windows
           path: shots
           if-no-files-found: warn
+          retention-days: 7
 
   release:
     name: Release (on tag)
