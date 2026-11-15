@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
 using Avalonia.Media;
@@ -46,13 +47,25 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly Dictionary<int, DateTime> _memoryOverSince = new();
     private readonly Dictionary<int, DrainState> _drainingProcesses = new();
     private readonly Dictionary<string, DateTime> _lastAlertEmission = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _logOnce = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _cachedRacCandidates = new();
+    private readonly object _racCandidatesLock = new();
+    private volatile bool _racCandidatesStale;
     private readonly List<string> _cachedTechLogFiles = new();
-    private RacSnapshot? _cachedRac;
+    private readonly Dictionary<string, (string Context, double LastCallMs)> _techContextBySession = new(StringComparer.OrdinalIgnoreCase);
+    private int _techLogFileCacheHour = -1;
+    private RacSnapshot? _cachedRac, _displayedRac;
+    private Task? _racPollTask;
+    private string _lastRacVersion = "?";
+    private DateTime _lastRacDiagnosticAt = DateTime.MinValue;
+    private bool _manualRefreshPending, _adminBusy;
+    private static readonly TimeSpan ManualRacWait = TimeSpan.FromSeconds(30), BackgroundRacWait = TimeSpan.FromSeconds(2);
     private DateTime _lastAutomaticDrain = DateTime.MinValue;
     private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _racCandidatesCachedAt = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue;
     private string _cachedVolumeSummary = "не определены", _cachedStaticSystem = "";
     private readonly StringBuilder _log = new();
+    private readonly object _logLock = new();
+    private bool _logFlushPending;
     private readonly DiskPerformanceMonitor _disk = new();
     private readonly NetworkPerformanceMonitor _network = new();
     private string _physicalDiskInfo = "Накопители: определение типа SSD/HDD/NVMe…";
@@ -65,7 +78,8 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
     private ProcessRow? _selectedProcess;
-    private string? _lastRacPath, _lastClusterId;
+    private string? _lastRacPath;
+    private volatile string? _lastClusterId; // читается и из фонового опроса RAC, и из команд UI
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
     private IBrush _statusColor = Brushes.Goldenrod;
     private int _processCount, _sessionCount, _activeSessionCount, _sleepingSessionCount, _alertCount;
@@ -75,30 +89,32 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         Settings = MonitorSettings.Load();
         Settings.BackgroundJobsDisabledInfobases ??= new();
-        RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
+        // Асинхронные команды выполняются через AsyncRelayCommand: исключение в обработчике больше не
+        // роняет приложение (async void), а повторное нажатие во время работы команды игнорируется.
+        RefreshCommand = new AsyncRelayCommand(() => RefreshAsync(true), OnCommandError);
         ExportCommand = new RelayCommand(ExportHtmlReport);
-        SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _racCandidatesCachedAt = DateTime.MinValue; _lastRacPoll = DateTime.MinValue; await RefreshAsync(true); });
-        StartRasCommand = new RelayCommand(async () => await StartRasAsync());
+        SaveSettingsCommand = new AsyncRelayCommand(async () => { TrySaveSettings("кнопка «Сохранить и проверить»"); _racCandidatesStale = true; _lastRacPoll = DateTime.MinValue; await RefreshAsync(true); }, OnCommandError);
+        StartRasCommand = new AsyncRelayCommand(StartRasAsync, OnCommandError);
         OpenWebsiteCommand = new RelayCommand(() => OpenUri("https://csl.by"));
         OpenEmailCommand = new RelayCommand(() => OpenUri("mailto:info@csl.by"));
         OpenPhoneCommand = new RelayCommand(() => OpenUri("tel:+375293371412"));
         GenerateDailyReportCommand = new RelayCommand(() => GenerateDailyReport(DateTime.Today, false));
-        TerminateAllSessionsCommand = new RelayCommand(async () => await TerminateSessionsAsync(Sessions.ToList(), "всех сеансов"));
-        TerminateDuplicateSessionsCommand = new RelayCommand(async () => await TerminateSessionsAsync(GetDuplicateSessions(), "дублирующихся ранних сеансов"));
-        TerminateSleepingSessionsCommand = new RelayCommand(async () => await TerminateSessionsAsync(Sessions.Where(x => x.IsSleeping).ToList(), "спящих сеансов"));
-        TerminateExceptConfiguratorCommand = new RelayCommand(async () => await TerminateSessionsAsync(Sessions.Where(x => !IsConfigurator(x)).ToList(), "всех сеансов, кроме Конфигуратора"));
-        DisableBackgroundJobsCommand = new RelayCommand(async () => await SetBackgroundJobsAsync(false));
-        EnableBackgroundJobsCommand = new RelayCommand(async () => await SetBackgroundJobsAsync(true));
-        RestartOneCServicesCommand = new RelayCommand(async () => await RestartOneCServicesAsync());
-        KillAllRphostCommand = new RelayCommand(async () => await KillAllRphostAsync());
-        GracefulTurnOffCommand = new RelayCommand(async () => await GracefulTurnOffSelectedAsync());
+        TerminateAllSessionsCommand = AdminCommand(() => TerminateSessionsAsync(Sessions.ToList(), "всех сеансов"));
+        TerminateDuplicateSessionsCommand = AdminCommand(() => TerminateSessionsAsync(GetDuplicateSessions(), "дублирующихся ранних сеансов"));
+        TerminateSleepingSessionsCommand = AdminCommand(() => TerminateSessionsAsync(Sessions.Where(x => x.IsSleeping).ToList(), "спящих сеансов"));
+        TerminateExceptConfiguratorCommand = AdminCommand(() => TerminateSessionsAsync(Sessions.Where(x => !IsConfigurator(x)).ToList(), "всех сеансов, кроме Конфигуратора"));
+        DisableBackgroundJobsCommand = AdminCommand(() => SetBackgroundJobsAsync(false));
+        EnableBackgroundJobsCommand = AdminCommand(() => SetBackgroundJobsAsync(true));
+        RestartOneCServicesCommand = AdminCommand(RestartOneCServicesAsync);
+        KillAllRphostCommand = AdminCommand(KillAllRphostAsync);
+        GracefulTurnOffCommand = AdminCommand(GracefulTurnOffSelectedAsync);
         if (string.IsNullOrWhiteSpace(Settings.ReportFolder)) Settings.ReportFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "1CServerMonitor", "Reports");
         UpdateServerHeader(null, default, default);
         _ = LoadPhysicalDiskInfoAsync();
         _ = LoopAsync();
     }
 
-    public bool IsRunning { get => _isRunning; set { Set(ref _isRunning, value); Status = value ? "Мониторинг включён" : "Мониторинг на паузе"; StatusColor = value ? Brushes.LightGreen : Brushes.Goldenrod; } }
+    public bool IsRunning { get => _isRunning; set { if (_isRunning == value) return; Set(ref _isRunning, value); Status = value ? "Мониторинг включён" : "Мониторинг на паузе"; StatusColor = value ? Brushes.LightGreen : Brushes.Goldenrod; } }
     public string Status { get => _status; private set => Set(ref _status, value); }
     public IBrush StatusColor { get => _statusColor; private set => Set(ref _statusColor, value); }
     public string RacStatus { get => _racStatus; private set => Set(ref _racStatus, value); }
@@ -125,6 +141,24 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string SessionBreakdownText { get => _sessionBreakdownText; private set => Set(ref _sessionBreakdownText, value); }
     public string LogText { get => _logText; private set => Set(ref _logText, value); }
 
+    /// <summary>Опасные административные операции выполняются строго по одной.</summary>
+    private AsyncRelayCommand AdminCommand(Func<Task> action) => new(async () =>
+    {
+        if (_adminBusy) { AdminActionStatus = "Дождитесь завершения предыдущей административной операции"; return; }
+        _adminBusy = true;
+        try { await action(); }
+        catch (Exception ex) { AdminActionStatus = "Ошибка операции: " + ex.Message; Log("Ошибка административной операции: " + ex); }
+        finally { _adminBusy = false; }
+    }, OnCommandError);
+
+    private void OnCommandError(Exception ex) { Status = "Ошибка команды: " + ex.Message; StatusColor = Brushes.LightCoral; Log("Ошибка команды: " + ex); }
+
+    private bool TrySaveSettings(string reason)
+    {
+        try { Settings.Save(); return true; }
+        catch (Exception ex) { Log($"Не удалось сохранить настройки ({reason}): {ex.Message}"); return false; }
+    }
+
     private void OpenUri(string uri)
     {
         try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); }
@@ -140,14 +174,10 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             _cachedStaticSystem = $"{RuntimeInformation.OSDescription.Trim()} · {RuntimeInformation.OSArchitecture} · {GetCpuDescription()} · {Environment.ProcessorCount} лог. CPU";
         var memory = GetPhysicalMemory();
         var oneC = "1С/RAC: не подключён";
-        if (!string.IsNullOrWhiteSpace(racPath) && File.Exists(racPath))
-        {
-            var version = FileVersionInfo.GetVersionInfo(racPath).FileVersion ?? "?";
-            oneC = $"1С/RAC {version} ({ArchitectureLabel(racPath)})";
-        }
+        // Версия RAC определяется один раз при успешном опросе, а не чтением файла на каждом такте.
+        if (!string.IsNullOrWhiteSpace(racPath)) oneC = $"1С/RAC {_lastRacVersion} ({ArchitectureLabel(racPath)})";
         var diskText = disk.Available ? $"диск {disk.UsagePercent:0}% · R {FormatRate(disk.ReadBytesPerSec)} · W {FormatRate(disk.WriteBytesPerSec)} · ср. очередь {DiskQueueLabel(disk)}" : "диск: ожидание данных";
         NetworkLoadText = network.Available ? $"Сеть: ↓ {FormatRate(network.ReceiveBytesPerSec)} · ↑ {FormatRate(network.SendBytesPerSec)} · загрузка {network.UtilizationPercent:0.0}% · адаптеров {network.InterfaceCount}" : "Сеть: ожидание второго измерения";
-        if (DateTime.UtcNow - _lastVolumeRefresh >= TimeSpan.FromMinutes(1)) { _cachedVolumeSummary = GetVolumeSummary(); _lastVolumeRefresh = DateTime.UtcNow; }
         ServerHardwareText = $"{_virtualizationInfo} · {_physicalDiskInfo} · Тома: {_cachedVolumeSummary}";
         ServerHeaderDetails = $"{_cachedStaticSystem} · RAM {memory}\n{ServerHardwareText}\n{oneC} · RAS {Settings.Endpoint} · rphost {ProcessCount} · {diskText} · {NetworkLoadText}";
     }
@@ -187,7 +217,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var manufacturer = bios?.GetValue("SystemManufacturer")?.ToString()?.Trim() ?? "";
             var model = bios?.GetValue("SystemProductName")?.ToString()?.Trim() ?? "";
             var text = (manufacturer + " " + model).ToLowerInvariant();
-            var platform = text.Contains("vmware") ? "VMware" : text.Contains("virtualbox") || text.Contains("oracle") ? "VirtualBox" :
+            var platform = text.Contains("vmware") ? "VMware" : text.Contains("virtualbox") || text.Contains("innotek") ? "VirtualBox" :
                 text.Contains("virtual machine") && text.Contains("microsoft") ? "Microsoft Hyper-V" : text.Contains("kvm") || text.Contains("qemu") ? "KVM/QEMU" :
                 text.Contains("xen") ? "Xen" : text.Contains("amazon") || text.Contains("ec2") ? "Amazon EC2" : text.Contains("google") ? "Google Compute Engine" :
                 text.Contains("parallels") ? "Parallels" : "";
@@ -200,7 +230,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         var cpu = "процессор не определён";
         if (OperatingSystem.IsWindows())
-            try { cpu = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0")?.GetValue("ProcessorNameString")?.ToString()?.Trim() ?? cpu; } catch { }
+            try { using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0"); cpu = key?.GetValue("ProcessorNameString")?.ToString()?.Trim() ?? cpu; } catch { }
         return cpu;
     }
 
@@ -226,7 +256,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private async Task LoopAsync()
     {
-        await Task.Delay(400);
+        try { await Task.Delay(400, _stop.Token); } catch (OperationCanceledException) { return; }
         while (!_stop.IsCancellationRequested)
         {
             if (IsRunning) await RefreshAsync(false);
@@ -237,124 +267,169 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private async Task RefreshAsync(bool manual)
     {
-        if (_busy) return;
+        // Ручной запрос во время идущего цикла не теряется, а выполняется сразу после него.
+        if (_busy) { if (manual) _manualRefreshPending = true; return; }
         _busy = true;
         try
         {
-            var local = SampleLocalProcesses();
-            var disk = _disk.Sample();
-            var network = _network.Sample();
-            var now = DateTime.Now;
-            RacSnapshot? rac = _cachedRac;
-            string? selectedRac = _lastRacPath;
-            var racDue = manual || rac == null || now - _lastRacPoll >= TimeSpan.FromSeconds(Math.Max(5, (double)Settings.RacPollSeconds));
-            if (racDue)
+            do
             {
-                _lastRacPoll = now; // при ошибке не запускаем тяжёлый повтор на каждом локальном такте
-                RacSnapshot? freshRac = null; Exception? lastRacError = null;
-                var racCandidates = FindRacCandidates();
-                foreach (var racPath in racCandidates)
-                {
-                    foreach (var endpoint in EndpointCandidates(Settings.Endpoint))
-                    {
-                        try
-                        {
-                            freshRac = await ReadRacAsync(racPath, endpoint);
-                            var discoveredChanged = !string.Equals(Settings.RacPath, racPath, StringComparison.OrdinalIgnoreCase) || !string.Equals(Settings.Endpoint, endpoint, StringComparison.OrdinalIgnoreCase);
-                            Settings.RacPath = racPath; Settings.Endpoint = endpoint;
-                            if (discoveredChanged) { try { Settings.Save(); } catch (Exception saveEx) { Log("Не удалось сохранить найденный путь RAC: " + saveEx.Message); } }
-                            selectedRac = racPath; _lastRacPath = racPath; _cachedRac = freshRac; rac = freshRac;
-                            _lastInfoBases.Clear(); foreach (var pair in freshRac.InfoBases) _lastInfoBases[pair.Key] = pair.Value;
-                            var version = FileVersionInfo.GetVersionInfo(racPath).FileVersion ?? "?";
-                            RacStatus = $"Подключено: {endpoint} • RAC {version} • {ArchitectureLabel(racPath)} • сеансов {freshRac.Sessions.Count} • опрос раз в {Settings.RacPollSeconds:0} с";
-                            break;
-                        }
-                        catch (Exception ex) { lastRacError = ex; LogOnce($"rac:{racPath}:{endpoint}:{ex.Message}", $"RAC {racPath}, {endpoint}: {ex.Message}", TimeSpan.FromMinutes(5)); }
-                    }
-                    if (freshRac != null) break;
-                }
-                if (freshRac == null)
-                {
-                    var error = lastRacError?.Message ?? "нет данных";
-                    var unavailable = racCandidates.Count == 0
-                        ? "RAC/RAS не найдены. Запустите от администратора или укажите rac.exe вручную."
-                        : error.Contains("не аутентифицирован", StringComparison.OrdinalIgnoreCase)
-                            ? "Требуется имя администратора кластера. Если пароль не задан — заполните только имя."
-                            : $"Проверено комплектов RAC/RAS: {racCandidates.Count}. Недоступны: {error}";
-                    RacStatus = rac != null ? unavailable + " • показаны последние полученные данные" : unavailable;
-                }
+                var forced = manual || _manualRefreshPending;
+                manual = false; _manualRefreshPending = false;
+                await RefreshCoreAsync(forced);
             }
-
-            var sessions = rac?.Sessions ?? new List<SessionRow>();
-            if (racDue && (manual || now - _lastTechLogScan >= TimeSpan.FromSeconds(Math.Max(15, (double)Settings.TechLogPollSeconds))))
-            {
-                ApplyTechLog(sessions); _lastTechLogScan = now;
-            }
-            var processMetrics = rac?.Processes ?? new Dictionary<int, RacProcess>();
-            var sessionsByPid = sessions.GroupBy(x => x.Pid).ToDictionary(x => x.Key, x => x.ToList());
-            var localPids = local.Select(x => x.Pid).ToHashSet();
-            foreach (var p in local)
-            {
-                if (processMetrics.TryGetValue(p.Pid, out var rp))
-                {
-                    p.ProcessUuid = rp.ProcessUuid; p.AvgCallMs = rp.AvgCallMs; p.AvgDbMs = rp.AvgDbMs; p.RacMemoryMb = rp.MemoryMb;
-                }
-                var linked = sessionsByPid.TryGetValue(p.Pid, out var foundSessions) ? foundSessions : new List<SessionRow>();
-                ApplyProcessLoadToSessions(p, linked);
-                p.SessionCount = linked.Count;
-                p.Users = string.Join(", ", linked.Select(x => string.IsNullOrWhiteSpace(x.UserName) ? "<не указан>" : x.UserName).Distinct().Take(8));
-                Score(p, linked);
-            }
-            foreach (var rp in processMetrics.Values.Where(x => !localPids.Contains(x.Pid)))
-            {
-                var linked = sessionsByPid.TryGetValue(rp.Pid, out var foundSessions) ? foundSessions : new List<SessionRow>();
-                var p = new ProcessRow { Pid = rp.Pid, ProcessUuid = rp.ProcessUuid, MemoryMb = rp.MemoryMb, RacMemoryMb = rp.MemoryMb, AvgCallMs = rp.AvgCallMs, AvgDbMs = rp.AvgDbMs, SessionCount = linked.Count, Users = string.Join(", ", linked.Select(x => x.UserName).Distinct().Take(8)) };
-                ApplyProcessLoadToSessions(p, linked);
-                Score(p, linked); local.Add(p);
-            }
-            local = local.OrderByDescending(x => x.Risk).ThenByDescending(x => x.MemoryMb).ToList();
-            await EvaluateGracefulDrainAsync(local, sessions, now);
-            if (now - _lastHistorySample >= TimeSpan.FromSeconds(10))
-            {
-                foreach (var p in local) _history.Add(new HistoryRow(now, p.Pid, p.Cpu, p.MemoryMb, p.SessionCount, p.Users, p.Risk, p.Diagnosis, disk.UsagePercent, disk.ReadBytesPerSec, disk.WriteBytesPerSec, disk.QueueLength, network.ReceiveBytesPerSec, network.SendBytesPerSec, network.UtilizationPercent));
-                if (_history.Count > 12000) _history.RemoveRange(0, _history.Count - 12000);
-                _lastHistorySample = now;
-            }
-            if (now - _lastPersistentSample >= TimeSpan.FromSeconds(Math.Max(30, (double)Settings.HistoryWriteSeconds)))
-            {
-                AppendDailyHistory(local, disk, network, now);
-                AccumulateDailyStats(now, local, sessions, disk, network);
-                _lastPersistentSample = now;
-            }
-
-            await Dispatcher.UIThread.InvokeAsync(() =>
-            {
-                var selectedPid = SelectedProcess?.Pid;
-                Replace(Processes, local); SelectedProcess = selectedPid.HasValue ? Processes.FirstOrDefault(x => x.Pid == selectedPid.Value) : null;
-                if (racDue || manual) Replace(Sessions, sessions.OrderByDescending(s => s.Blocked != "нет").ThenBy(s => s.IsSleeping).ThenBy(s => s.UserName));
-                ProcessCount = local.Count; SessionCount = sessions.Count;
-                ActiveSessionCount = sessions.Count(x => !x.IsSleeping); SleepingSessionCount = sessions.Count(x => x.IsSleeping);
-                SessionBreakdownText = $"активные {ActiveSessionCount} • спящие {SleepingSessionCount}";
-                var deviations = new List<string>();
-                if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert) deviations.Add($"диск {disk.UsagePercent:0}% ≥ порога {Settings.DiskAlert:0}% (ср. очередь {DiskQueueLabel(disk)})");
-                foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"PID {p.Pid}: {p.Diagnosis}");
-                foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}, PID {s.Pid}");
-                AlertCount = deviations.Count;
-                TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
-                DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
-                DiskIoText = disk.Available ? $"чтение {FormatRate(disk.ReadBytesPerSec)} • запись {FormatRate(disk.WriteBytesPerSec)}" : "счётчики недоступны";
-                DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)}" : "Windows PDH";
-                Status = deviations.Count > 0 ? $"Отклонения: {deviations.Count} · {string.Join("; ", deviations.Take(3))}{(deviations.Count > 3 ? "; … подробнее на вкладке «Обзор»" : "")}" : "Нагрузка в норме";
-                StatusColor = deviations.Count > 0 ? Brushes.LightCoral : Brushes.LightGreen;
-                Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
-                UpdateServerHeader(selectedRac, disk, network);
-            });
-            AddAlerts(local, sessions, disk, now);
-            CheckAutomaticDailyReport(now);
-            if (manual) Log($"Ручное обновление: rphost={local.Count}, сеансы={sessions.Count}");
+            while (_manualRefreshPending && !_stop.IsCancellationRequested);
         }
         catch (Exception ex) { Status = "Ошибка мониторинга"; StatusColor = Brushes.LightCoral; Log(ex.ToString()); }
         finally { _busy = false; }
+    }
+
+    private async Task RefreshCoreAsync(bool manual)
+    {
+        // Опрос процессов, счётчиков PDH, сетевых адаптеров и томов выполняется вне UI-потока,
+        // чтобы окно не подвисало на время системных вызовов.
+        var refreshVolumes = DateTime.UtcNow - _lastVolumeRefresh >= TimeSpan.FromMinutes(1);
+        var sample = await Task.Run(() => (Processes: SampleLocalProcesses(), Disk: _disk.Sample(), Network: _network.Sample(), Volumes: refreshVolumes ? GetVolumeSummary() : null));
+        var local = sample.Processes; var disk = sample.Disk; var network = sample.Network;
+        if (sample.Volumes != null) { _cachedVolumeSummary = sample.Volumes; _lastVolumeRefresh = DateTime.UtcNow; }
+        var now = DateTime.Now;
+
+        // RAC опрашивается отдельной задачей. Фоновый такт ждёт её не дольше 2 с, поэтому зависший
+        // или недоступный RAS больше не останавливает локальные метрики; результат подхватит
+        // следующий такт. Ручное обновление ждёт свежие данные до 30 с.
+        if (manual && _racPollTask != null) await Task.WhenAny(_racPollTask, Task.Delay(ManualRacWait));
+        if (_racPollTask is { IsCompleted: true }) _racPollTask = null;
+        // Повтор только по интервалу: раньше при отсутствии подключения RAC перезапускался на каждом такте.
+        var racDue = manual || now - _lastRacPoll >= TimeSpan.FromSeconds(Math.Max(5, (double)Settings.RacPollSeconds));
+        if (racDue && _racPollTask == null)
+        {
+            _lastRacPoll = now;
+            var scanTechLog = manual || now - _lastTechLogScan >= TimeSpan.FromSeconds(Math.Max(15, (double)Settings.TechLogPollSeconds));
+            if (scanTechLog) _lastTechLogScan = now;
+            var poll = PollRacAsync(scanTechLog);
+            _racPollTask = poll;
+            await Task.WhenAny(poll, Task.Delay(manual ? ManualRacWait : BackgroundRacWait));
+            if (poll.IsCompleted) _racPollTask = null;
+        }
+        var rac = _cachedRac; var selectedRac = _lastRacPath;
+
+        var sessions = rac?.Sessions ?? new List<SessionRow>();
+        var processMetrics = rac?.Processes ?? new Dictionary<int, RacProcess>();
+        var sessionsByPid = sessions.GroupBy(x => x.Pid).ToDictionary(x => x.Key, x => x.ToList());
+        var localPids = local.Select(x => x.Pid).ToHashSet();
+        foreach (var p in local)
+        {
+            if (processMetrics.TryGetValue(p.Pid, out var rp))
+            {
+                p.ProcessUuid = rp.ProcessUuid; p.AvgCallMs = rp.AvgCallMs; p.AvgDbMs = rp.AvgDbMs; p.RacMemoryMb = rp.MemoryMb;
+            }
+            var linked = sessionsByPid.TryGetValue(p.Pid, out var foundSessions) ? foundSessions : new List<SessionRow>();
+            ApplyProcessLoadToSessions(p, linked);
+            p.SessionCount = linked.Count;
+            p.Users = string.Join(", ", linked.Select(x => string.IsNullOrWhiteSpace(x.UserName) ? "<не указан>" : x.UserName).Distinct().Take(8));
+            Score(p, linked);
+        }
+        foreach (var rp in processMetrics.Values.Where(x => !localPids.Contains(x.Pid)))
+        {
+            var linked = sessionsByPid.TryGetValue(rp.Pid, out var foundSessions) ? foundSessions : new List<SessionRow>();
+            var p = new ProcessRow { Pid = rp.Pid, ProcessUuid = rp.ProcessUuid, MemoryMb = rp.MemoryMb, RacMemoryMb = rp.MemoryMb, AvgCallMs = rp.AvgCallMs, AvgDbMs = rp.AvgDbMs, SessionCount = linked.Count, Users = string.Join(", ", linked.Select(x => x.UserName).Distinct().Take(8)) };
+            ApplyProcessLoadToSessions(p, linked);
+            Score(p, linked); local.Add(p);
+        }
+        local = local.OrderByDescending(x => x.Risk).ThenByDescending(x => x.MemoryMb).ToList();
+        await EvaluateGracefulDrainAsync(local, sessions, now);
+        if (now - _lastHistorySample >= TimeSpan.FromSeconds(10))
+        {
+            foreach (var p in local) _history.Add(new HistoryRow(now, p.Pid, p.Cpu, p.MemoryMb, p.SessionCount, p.Users, p.Risk, p.Diagnosis, disk.UsagePercent, disk.ReadBytesPerSec, disk.WriteBytesPerSec, disk.QueueLength, network.ReceiveBytesPerSec, network.SendBytesPerSec, network.UtilizationPercent));
+            if (_history.Count > 12000) _history.RemoveRange(0, _history.Count - 12000);
+            _lastHistorySample = now;
+        }
+        if (now - _lastPersistentSample >= TimeSpan.FromSeconds(Math.Max(30, (double)Settings.HistoryWriteSeconds)))
+        {
+            var rowsToWrite = local;
+            await Task.Run(() => AppendDailyHistory(rowsToWrite, disk, network, now));
+            AccumulateDailyStats(now, local, sessions, disk, network);
+            _lastPersistentSample = now;
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            var selectedPid = SelectedProcess?.Pid;
+            Replace(Processes, local); SelectedProcess = selectedPid.HasValue ? Processes.FirstOrDefault(x => x.Pid == selectedPid.Value) : null;
+            // Таблица сеансов перестраивается только при новом снимке RAC (или вручную), чтобы не сбрасывать прокрутку.
+            if (manual || !ReferenceEquals(rac, _displayedRac)) { _displayedRac = rac; Replace(Sessions, sessions.OrderByDescending(s => s.Blocked != "нет").ThenBy(s => s.IsSleeping).ThenBy(s => s.UserName)); }
+            ProcessCount = local.Count; SessionCount = sessions.Count;
+            ActiveSessionCount = sessions.Count(x => !x.IsSleeping); SleepingSessionCount = sessions.Count(x => x.IsSleeping);
+            SessionBreakdownText = $"активные {ActiveSessionCount} • спящие {SleepingSessionCount}";
+            var deviations = new List<string>();
+            if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert) deviations.Add($"диск {disk.UsagePercent:0}% ≥ порога {Settings.DiskAlert:0}% (ср. очередь {DiskQueueLabel(disk)})");
+            foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"PID {p.Pid}: {p.Diagnosis}");
+            foreach (var s in sessions.Where(x => x.Blocked != "нет")) deviations.Add($"блокировка: {s.UserName}, {s.InfoBase}, PID {s.Pid}");
+            AlertCount = deviations.Count;
+            TotalMemoryText = FormatMb(local.Sum(x => x.MemoryMb)); TotalCpuText = $"{local.Sum(x => x.Cpu):0.0} %";
+            DiskUsageText = disk.Available ? $"{disk.UsagePercent:0.0} %" : "нет данных";
+            DiskIoText = disk.Available ? $"чтение {FormatRate(disk.ReadBytesPerSec)} • запись {FormatRate(disk.WriteBytesPerSec)}" : "счётчики недоступны";
+            DiskQueueText = disk.Available ? $"средняя очередь {DiskQueueLabel(disk)}" : "Windows PDH";
+            Status = deviations.Count > 0 ? $"Отклонения: {deviations.Count} · {string.Join("; ", deviations.Take(3))}{(deviations.Count > 3 ? "; … подробнее на вкладке «Обзор»" : "")}" : "Нагрузка в норме";
+            StatusColor = deviations.Count > 0 ? Brushes.LightCoral : Brushes.LightGreen;
+            Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
+            UpdateServerHeader(selectedRac, disk, network);
+        });
+        AddAlerts(local, sessions, disk, now);
+        CheckAutomaticDailyReport(now);
+        if (manual) Log($"Ручное обновление: rphost={local.Count}, сеансы={sessions.Count}");
+    }
+
+    /// <summary>Опрос кластера через rac.exe. Запуск процессов, разбор вывода и чтение техжурнала идут в пуле потоков.</summary>
+    private async Task PollRacAsync(bool scanTechLog)
+    {
+        try
+        {
+            RacSnapshot? freshRac = null; Exception? lastRacError = null;
+            var racCandidates = await Task.Run(() => FindRacCandidates());
+            foreach (var racPath in racCandidates)
+            {
+                foreach (var endpoint in EndpointCandidates(Settings.Endpoint))
+                {
+                    try
+                    {
+                        var polled = await Task.Run(async () =>
+                        {
+                            var snapshot = await ReadRacAsync(racPath, endpoint);
+                            ApplyTechLog(snapshot.Sessions, scanTechLog);
+                            return (Snapshot: snapshot, Version: GetFileVersion(racPath));
+                        });
+                        freshRac = polled.Snapshot; _lastRacVersion = polled.Version;
+                        var discoveredChanged = !string.Equals(Settings.RacPath, racPath, StringComparison.OrdinalIgnoreCase) || !string.Equals(Settings.Endpoint, endpoint, StringComparison.OrdinalIgnoreCase);
+                        Settings.RacPath = racPath; Settings.Endpoint = endpoint;
+                        if (discoveredChanged) TrySaveSettings("найденный путь RAC");
+                        _lastRacPath = racPath; _cachedRac = freshRac;
+                        _lastInfoBases.Clear(); foreach (var pair in freshRac.InfoBases) _lastInfoBases[pair.Key] = pair.Value;
+                        RacStatus = $"Подключено: {endpoint} • RAC {polled.Version} • {ArchitectureLabel(racPath)} • сеансов {freshRac.Sessions.Count} • опрос раз в {Settings.RacPollSeconds:0} с";
+                        break;
+                    }
+                    catch (Exception ex) { lastRacError = ex; LogOnce($"rac:{racPath}:{endpoint}:{ex.Message}", $"RAC {racPath}, {endpoint}: {ex.Message}", TimeSpan.FromMinutes(5)); }
+                }
+                if (freshRac != null) break;
+            }
+            if (freshRac == null)
+            {
+                var error = lastRacError?.Message ?? "нет данных";
+                var unavailable = racCandidates.Count == 0
+                    ? "RAC/RAS не найдены. Запустите от администратора или укажите rac.exe вручную."
+                    : error.Contains("не аутентифицирован", StringComparison.OrdinalIgnoreCase)
+                        ? "Требуется имя администратора кластера. Если пароль не задан — заполните только имя."
+                        : $"Проверено комплектов RAC/RAS: {racCandidates.Count}. Недоступны: {error}";
+                RacStatus = _cachedRac != null ? unavailable + " • показаны последние полученные данные" : unavailable;
+            }
+        }
+        catch (Exception ex) { RacStatus = "Ошибка опроса RAC: " + ex.Message; Log("Опрос RAC: " + ex); }
+    }
+
+    private static string GetFileVersion(string path)
+    {
+        try { return FileVersionInfo.GetVersionInfo(path).FileVersion ?? "?"; }
+        catch { return "?"; }
     }
 
     private async Task EvaluateGracefulDrainAsync(List<ProcessRow> processes, List<SessionRow> sessions, DateTime now)
@@ -382,7 +457,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         if (candidate == null) { var max = processes.OrderByDescending(x => x.MemoryMb).FirstOrDefault(); AutoDrainStatus = max == null ? "Автовывод: процессы не найдены" : $"Автовывод активен · максимум PID {max.Pid}: {max.MemoryText} · порог {Settings.AutoDrainMemoryMb:0} МБ / {Settings.AutoDrainMinutes:0} мин"; return; }
         var active = sessions.Where(s => s.Pid == candidate.Pid && (s.DurationCurrentMs > 0 || s.Blocked != "нет")).ToList();
         if (active.Count > 0) { candidate.DrainStatus = $"Ожидание {active.Count} активных вызовов"; AutoDrainStatus = $"PID {candidate.Pid} превысил порог, ожидается завершение активных вызовов"; return; }
-        if (await TurnOffProcessAsync(candidate, true)) _lastAutomaticDrain = now;
+        // Пауза включается и после неудачной попытки: иначе при ошибке RAC команда и запись в журнал
+        // повторялись бы на каждом такте.
+        await TurnOffProcessAsync(candidate, true); _lastAutomaticDrain = now;
     }
 
     private async Task GracefulTurnOffSelectedAsync()
@@ -438,10 +515,16 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private void CheckAutomaticDailyReport(DateTime now)
     {
-        if (!Settings.AutoDailyReport || now.TimeOfDay < new TimeSpan(23, 55, 0)) return;
-        if (DateTime.TryParse(Settings.LastAutoReportDate, out var last) && last.Date == now.Date) return;
-        GenerateDailyReport(now.Date, true);
-        Settings.LastAutoReportDate = now.ToString("yyyy-MM-dd"); Settings.Save();
+        if (!Settings.AutoDailyReport) return;
+        var lastReported = DateTime.TryParseExact(Settings.LastAutoReportDate, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var last) ? last.Date : DateTime.MinValue;
+        // После 23:55 формируется отчёт за текущий день. Если в это время мониторинг стоял на паузе
+        // или цикл был занят, отчёт за вчерашний день создаётся при первом измерении нового дня.
+        var target = now.TimeOfDay >= new TimeSpan(23, 55, 0) ? now.Date : now.Date.AddDays(-1);
+        if (lastReported >= target) return;
+        Settings.LastAutoReportDate = target.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        if (target != now.Date && !_serverHistory.Any(x => x.At.Date == target)) return; // за вчера данных нет — отчёт не нужен
+        GenerateDailyReport(target, true);
+        TrySaveSettings("дата автоотчёта");
     }
 
     private void GenerateDailyReport(DateTime date, bool automatic)
@@ -479,14 +562,17 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         catch (Exception ex) { AdminActionStatus = "Ошибка суточного отчёта: " + ex.Message; Log(AdminActionStatus); }
     }
 
-    private List<SessionRow> GetDuplicateSessions() => Sessions.GroupBy(x => $"{x.InfoBase}|{x.UserName}|{x.Host}|{x.AppId}", StringComparer.OrdinalIgnoreCase).SelectMany(g => g.OrderByDescending(x => ParseRacDate(x.StartedAt)).Skip(1)).ToList();
+    // Служебные сеансы (фоновые задания, COM/веб-сервисы, консоль кластера) дубликатами не считаются:
+    // несколько таких сеансов одного пользователя с одного компьютера — штатная работа.
+    private List<SessionRow> GetDuplicateSessions() => Sessions.Where(x => !IsServiceSession(x)).GroupBy(x => $"{x.InfoBase}|{x.UserName}|{x.Host}|{x.AppId}", StringComparer.OrdinalIgnoreCase).SelectMany(g => g.OrderByDescending(x => ParseRacDate(x.StartedAt)).Skip(1)).ToList();
     private static bool IsConfigurator(SessionRow s) => s.AppId.Equals("Designer", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("Configurator", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("Конфигуратор", StringComparison.OrdinalIgnoreCase);
+    private static bool IsServiceSession(SessionRow s) => IsBackgroundSession(s) || s.AppId.Contains("Connection", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("Console", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("JobScheduler", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("Debugger", StringComparison.OrdinalIgnoreCase);
     private static bool IsBackgroundSession(SessionRow s) => s.AppId.Contains("Background", StringComparison.OrdinalIgnoreCase) || s.AppId.Contains("Фонов", StringComparison.OrdinalIgnoreCase);
 
     private bool CheckConfirmation(bool killRphost = false)
     {
         var expected = killRphost ? "УБИТЬ RPHOST" : "ПОДТВЕРЖДАЮ";
-        if (!string.Equals(AdminConfirmationText.Trim(), expected, StringComparison.OrdinalIgnoreCase)) { AdminActionStatus = $"Введите контрольную фразу: {expected}"; return false; }
+        if (!string.Equals((AdminConfirmationText ?? "").Trim(), expected, StringComparison.OrdinalIgnoreCase)) { AdminActionStatus = $"Введите контрольную фразу: {expected}"; return false; }
         return true;
     }
 
@@ -513,7 +599,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             {
                 skipped++; Log($"Фоновые задания уже были запрещены до операции, база не будет добавлена в список обратного включения: {infoBase.Name}"); continue;
             }
-            AdminActionStatus = $"{(enable ? "Включение" : "Выключение")} фоновых заданий: {infoBase.Name} ({ok + errors + 1}/{targets.Count})…";
+            AdminActionStatus = $"{(enable ? "Включение" : "Выключение")} фоновых заданий: {infoBase.Name} ({ok + errors + skipped + 1}/{targets.Count})…";
             var auth = new List<string> { $"--cluster={_lastClusterId}", $"--infobase={infoBase.Uuid}", $"--scheduled-jobs-deny={state}" };
             if (!string.IsNullOrWhiteSpace(Settings.ClusterUser)) { auth.Add($"--cluster-user={Settings.ClusterUser}"); auth.Add($"--cluster-pwd={Settings.ClusterPassword}"); }
             var variants = new List<List<string>>
@@ -537,7 +623,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             }
             else { errors++; Log($"Не изменён режим фоновых заданий {infoBase.Name}: {last?.Message}"); }
         }
-        Settings.Save();
+        TrySaveSettings("список баз с выключенными фоновыми заданиями");
 
         if (!enable && ok > 0)
         {
@@ -581,8 +667,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         if (!CheckConfirmation()) return;
         if (_lastRacPath == null || _lastClusterId == null) { AdminActionStatus = "Нет подключения RAC"; return; }
         if (targets.Count == 0) { AdminActionStatus = "Подходящие сеансы не найдены"; return; }
+        targets = targets.Where(x => !string.IsNullOrWhiteSpace(x.SessionUuid)).ToList();
         var ok = 0; var errors = 0; AdminActionStatus = $"Завершение: {targets.Count}…";
-        foreach (var s in targets.Where(x => !string.IsNullOrWhiteSpace(x.SessionUuid)))
+        foreach (var s in targets)
         {
             AdminActionStatus = $"Завершается сеанс {s.UserName} ({ok + errors + 1}/{targets.Count})…";
             var auth = new List<string> { $"--cluster={_lastClusterId}" };
@@ -626,41 +713,49 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         finally { AdminConfirmationText = ""; }
     }
 
-    private void ApplyTechLog(List<SessionRow> sessions)
+    /// <summary>
+    /// Дополняет сеансы контекстом из технологического журнала. Вызывается из фонового опроса RAC.
+    /// Файлы читаются только при <paramref name="rescan"/>; между сканированиями новым снимкам RAC
+    /// подставляется сохранённый контекст — иначе колонка пустела бы на каждом опросе без сканирования.
+    /// </summary>
+    private void ApplyTechLog(List<SessionRow> sessions, bool rescan)
     {
         var path = Settings.TechLogPath;
-        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path) || sessions.Count == 0) return;
-        try
+        if (string.IsNullOrWhiteSpace(path)) { _techContextBySession.Clear(); return; }
+        if (rescan && sessions.Count > 0)
         {
-            if (DateTime.UtcNow - _techLogFileCacheAt >= TimeSpan.FromMinutes(10) || _cachedTechLogFiles.Count == 0)
+            try
             {
-                _cachedTechLogFiles.Clear();
-                _cachedTechLogFiles.AddRange(Directory.EnumerateFiles(path, "*.log", SearchOption.AllDirectories)
-                    .Select(x => new FileInfo(x)).OrderByDescending(x => x.LastWriteTimeUtc).Take(8).Select(x => x.FullName));
-                _techLogFileCacheAt = DateTime.UtcNow;
+                if (!Directory.Exists(path)) LogOnce("techlog-dir", "Технологический журнал: каталог не найден: " + path, TimeSpan.FromMinutes(30));
+                else
+                {
+                    // Файлы техжурнала сменяются каждый час (ггММддчч.log), поэтому список обновляется и при смене часа.
+                    if (DateTime.UtcNow - _techLogFileCacheAt >= TimeSpan.FromMinutes(10) || _cachedTechLogFiles.Count == 0 || _techLogFileCacheHour != DateTime.Now.Hour)
+                    {
+                        _cachedTechLogFiles.Clear();
+                        _cachedTechLogFiles.AddRange(Directory.EnumerateFiles(path, "*.log", SearchOption.AllDirectories)
+                            .Select(x => new FileInfo(x)).OrderByDescending(x => x.LastWriteTimeUtc).Take(8).Select(x => x.FullName));
+                        _techLogFileCacheAt = DateTime.UtcNow; _techLogFileCacheHour = DateTime.Now.Hour;
+                    }
+                    var index = new TechLogIndex();
+                    foreach (var file in _cachedTechLogFiles.Where(File.Exists))
+                    {
+                        try { foreach (var item in TechLogParser.ReadTail(file, 131072)) index.Add(item); }
+                        catch (IOException) { } // файл удалён или переименован ротацией журнала
+                    }
+                    _techContextBySession.Clear();
+                    foreach (var session in sessions)
+                    {
+                        if (string.IsNullOrWhiteSpace(session.SessionUuid)) continue;
+                        var found = index.Find(session.InfoBase, session.SessionNumber, session.UserName == "<не указан>" ? "" : session.UserName);
+                        if (found != null) _techContextBySession[session.SessionUuid] = (found.Context, found.DurationMs);
+                    }
+                }
             }
-            var lines = new List<string>();
-            foreach (var file in _cachedTechLogFiles.Where(File.Exists))
-            {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                if (fs.Length > 131072) fs.Seek(-131072, SeekOrigin.End);
-                using var reader = new StreamReader(fs, Encoding.UTF8, true);
-                if (fs.Position > 0) reader.ReadLine();
-                while (reader.ReadLine() is { } line) if (line.Contains("Context=", StringComparison.OrdinalIgnoreCase)) lines.Add(line);
-            }
-            foreach (var session in sessions)
-            {
-                var line = lines.LastOrDefault(x =>
-                    (!string.IsNullOrWhiteSpace(session.SessionNumber) && Regex.IsMatch(x, $@"SessionID\s*=\s*{Regex.Escape(session.SessionNumber)}(?:\D|$)", RegexOptions.IgnoreCase)) ||
-                    (!string.IsNullOrWhiteSpace(session.UserName) && x.Contains($"Usr={session.UserName}", StringComparison.OrdinalIgnoreCase)));
-                if (line == null) continue;
-                var context = Regex.Match(line, "Context\\s*=\\s*(?:'([^']*)'|\\\"([^\\\"]*)\\\"|([^,\\r\\n]+))", RegexOptions.IgnoreCase);
-                if (context.Success) session.TechContext = context.Groups.Cast<Group>().Skip(1).FirstOrDefault(g => g.Success)?.Value.Trim() ?? "";
-                var duration = Regex.Match(line, @"^\d{2}:\d{2}\.\d+-(\d+)");
-                if (duration.Success && double.TryParse(duration.Groups[1].Value, out var microseconds)) session.LastCallMs = microseconds / 1000d;
-            }
+            catch (Exception ex) { LogOnce("techlog:" + ex.Message, "Технологический журнал: " + ex.Message, TimeSpan.FromMinutes(5)); }
         }
-        catch (Exception ex) { Log("Технологический журнал: " + ex.Message); }
+        foreach (var session in sessions)
+            if (_techContextBySession.TryGetValue(session.SessionUuid, out var cached)) { session.TechContext = cached.Context; session.LastCallMs = cached.LastCallMs; }
     }
 
     private List<ProcessRow> SampleLocalProcesses()
@@ -670,14 +765,18 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         {
             try
             {
-                var total = proc.TotalProcessorTime;
                 double cpu = 0;
-                if (_cpu.TryGetValue(proc.Id, out var old))
+                try
                 {
-                    var sec = (now - old.At).TotalSeconds;
-                    if (sec > 0) cpu = Math.Max(0, Math.Min(100, (total - old.Total).TotalSeconds / sec / Environment.ProcessorCount * 100));
+                    var total = proc.TotalProcessorTime;
+                    if (_cpu.TryGetValue(proc.Id, out var old))
+                    {
+                        var sec = (now - old.At).TotalSeconds;
+                        if (sec > 0) cpu = Math.Max(0, Math.Min(100, (total - old.Total).TotalSeconds / sec / Environment.ProcessorCount * 100));
+                    }
+                    _cpu[proc.Id] = new CpuSample(now, total);
                 }
-                _cpu[proc.Id] = new CpuSample(now, total);
+                catch { } // без прав администратора CPU-время чужой службы недоступно; память всё равно показываем
                 rows.Add(new ProcessRow { Pid = proc.Id, Cpu = cpu, MemoryMb = proc.WorkingSet64 / 1048576d });
             }
             catch { }
@@ -755,11 +854,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             {
                 var candidateSessions = await RunListAsync(new[] { "session", "list" }, candidateCluster);
                 var count = ParseRecords(candidateSessions).Count;
-                Log($"RAC: кластер {candidateCluster}, найдено сеансов: {count}");
+                LogOnce("rac-cluster:" + candidateCluster, $"RAC: кластер {candidateCluster}, найдено сеансов: {count}", TimeSpan.FromMinutes(10));
                 if (count > bestSessionCount) { bestSessionCount = count; cluster = candidateCluster; sessionOutput = candidateSessions; }
                 if (count > 0 && candidateCluster.Equals(_lastClusterId, StringComparison.OrdinalIgnoreCase)) break;
             }
-            catch (Exception ex) { clusterError = ex; Log($"RAC: кластер {candidateCluster} недоступен: {ex.Message}"); }
+            catch (Exception ex) { clusterError = ex; LogOnce($"rac-cluster-error:{candidateCluster}:{ex.Message}", $"RAC: кластер {candidateCluster} недоступен: {ex.Message}", TimeSpan.FromMinutes(5)); }
         }
         if (cluster == null) throw new Exception("Не удалось прочитать сеансы ни одного кластера: " + clusterError?.Message);
         _lastClusterId = cluster;
@@ -776,7 +875,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         async Task<string> TryListAsync(string[] command, string cl)
         {
             try { return await RunListAsync(command, cl); }
-            catch (Exception ex) { Log($"RAC: {string.Join(' ', command)} недоступна, продолжаем по session list: {ex.Message}"); return ""; }
+            catch (Exception ex) { LogOnce($"rac-list:{command[0]}:{ex.Message}", $"RAC: {string.Join(' ', command)} недоступна, продолжаем по session list: {ex.Message}", TimeSpan.FromMinutes(5)); return ""; }
         }
 
         async Task<string> RunListAsync(string[] command, string cl)
@@ -798,9 +897,30 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             }
             throw last ?? new Exception("Команда RAC не выполнена");
         }
-        var ibRecords = ParseRecords(outp[0]);
+        var result = BuildSnapshot(outp[0], outp[1], outp[2], outp[3]);
+        // Диагностический файл пишется не чаще раза в 10 минут: сеансы без PID — обычное явление,
+        // и раньше полный вывод RAC сохранялся на диск при каждом опросе.
+        if ((result.Sessions.Count == 0 || result.Sessions.Any(x => x.Pid <= 0)) && DateTime.UtcNow - _lastRacDiagnosticAt >= TimeSpan.FromMinutes(10))
+        {
+            _lastRacDiagnosticAt = DateTime.UtcNow;
+            try
+            {
+                var diagnosticDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor");
+                Directory.CreateDirectory(diagnosticDir);
+                File.WriteAllText(Path.Combine(diagnosticDir, "last-rac-diagnostic.txt"), $"Generated: {DateTime.Now:O}\r\nRAC: {rac}\r\nEndpoint: {endpoint}\r\nClusters found: {string.Join(", ", clusterIds)}\r\nSelected cluster: {cluster}\r\nParsed sessions: {result.Sessions.Count}\r\n\r\n=== CLUSTER LIST ===\r\n{clusterOutput}\r\n=== INFOBASE LIST ===\r\n{outp[0]}\r\n=== PROCESS LIST ===\r\n{outp[1]}\r\n=== CONNECTION LIST ===\r\n{outp[2]}\r\n=== SESSION LIST ===\r\n{outp[3]}", new UTF8Encoding(true));
+                if (result.Sessions.Count == 0) LogOnce("rac-empty", "RAC подключён, но session list пуст. Диагностика: " + Path.Combine(diagnosticDir, "last-rac-diagnostic.txt"), TimeSpan.FromMinutes(30));
+            }
+            catch { }
+        }
+        return result;
+    }
+
+    /// <summary>Собирает снимок кластера из текстового вывода rac.exe (без обращения к процессам — удобно проверять отдельно).</summary>
+    internal static RacSnapshot BuildSnapshot(string infoBaseOutput, string processOutput, string connectionOutput, string sessionListOutput)
+    {
+        var ibRecords = ParseRecords(infoBaseOutput);
         var ib = ibRecords.Where(x => N(x.Get("infobase")).Length > 0).GroupBy(x => N(x.Get("infobase"))).ToDictionary(x => x.Key, x => x.First().Get("name"));
-        var pr = ParseRecords(outp[1]); var cn = ParseRecords(outp[2]); var ss = ParseRecords(outp[3]);
+        var pr = ParseRecords(processOutput); var cn = ParseRecords(connectionOutput); var ss = ParseRecords(sessionListOutput);
         var procUuidToPid = pr.Where(x => Int(x.Get("pid")) > 0).GroupBy(x => N(x.Get("process"))).ToDictionary(x => x.Key, x => Int(x.First().Get("pid")));
         var connectionLinks = new Dictionary<string, ConnectionLink>();
         var connectionCandidates = new List<ConnectionLink>();
@@ -811,7 +931,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             if (pid <= 0) pid = Int(c.Get("process-id"));
             var link = new ConnectionLink(pid, Empty(c.Get("current-service-call"), c.Get("current-service-name")), c.Get("current-dbms-request"), N(c.Get("host")), N(c.Get("infobase")), N(c.Get("application")), ParseRacDate(c.Get("connected-at")), Int(c.Get("conn-id")));
             connectionCandidates.Add(link);
-            AddLink("uuid", c.Get("connection"), link); AddLink("id", c.Get("conn-id"), link); AddLink("id", c.Get("connection-id"), link); AddLink("session", c.Get("session-number"), link);
+            AddLink("uuid", c.Get("connection"), link); AddLink("id", c.Get("conn-id"), link); AddLink("id", c.Get("connection-id"), link);
+            // session-number соединения — это номер обслуживаемого сеанса; он уникален только в пределах базы.
+            AddLink("session", link.InfoBase + ":" + N(c.Get("session-number")), link, N(c.Get("session-number")));
         }
         var result = new RacSnapshot();
         foreach (var b in ibRecords)
@@ -837,24 +959,16 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var dbRequest = Empty(s.Get("current-dbms-request"), link?.DbRequest ?? "");
             result.Sessions.Add(new SessionRow { SessionUuid = N(s.Get("session")), UserName = Empty(s.Get("user-name"), "<не указан>"), InfoBase = Empty(db, N(s.Get("infobase"))), AppId = s.Get("app-id"), Host = s.Get("host"), Pid = pid, SessionNumber = Empty(s.Get("session-id"), Empty(s.Get("session-number"), s.Get("session"))), StartedAt = s.Get("started-at"), LastActiveAt = s.Get("last-active-at"), IsSleeping = sleeping, MemoryCurrentMb = Num(s.Get("memory-current")) / 1048576d, MemoryLast5MinMb = Num(s.Get("memory-last-5min")) / 1048576d, CpuTimeCurrent = Num(s.Get("cpu-time-current")), CpuTimeLast5Min = Num(s.Get("cpu-time-last-5min")), DurationCurrentMs = Num(s.Get("duration-current")), DurationDbCurrentMs = Num(s.Get("duration-current-dbms")), DurationLast5MinMs = Num(s.Get("duration-last-5min")), DurationDbLast5MinMs = Num(s.Get("duration-last-5min-dbms")), CallsLast5Min = Int(s.Get("calls-last-5min")), BytesLast5Min = Num(s.Get("bytes-last-5min")), DbBytesLast5Min = Num(s.Get("dbms-bytes-last-5min")), ReadCurrent = Num(s.Get("read-current")), WriteCurrent = Num(s.Get("write-current")), ReadLast5Min = Num(s.Get("read-last-5min")), WriteLast5Min = Num(s.Get("write-last-5min")), Operation = operation, DbRequest = dbRequest, Blocked = IsTrue(b1) || IsTrue(b2) ? $"да (DBMS={b1}, LS={b2})" : "нет" });
         }
-        if (result.Sessions.Count == 0 || result.Sessions.Any(x => x.Pid <= 0))
-        {
-            try
-            {
-                var diagnosticDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor");
-                Directory.CreateDirectory(diagnosticDir);
-                File.WriteAllText(Path.Combine(diagnosticDir, "last-rac-diagnostic.txt"), $"Generated: {DateTime.Now:O}\r\nRAC: {rac}\r\nEndpoint: {endpoint}\r\nClusters found: {string.Join(", ", clusterIds)}\r\nSelected cluster: {cluster}\r\nParsed sessions: {result.Sessions.Count}\r\n\r\n=== CLUSTER LIST ===\r\n{clusterOutput}\r\n=== INFOBASE LIST ===\r\n{outp[0]}\r\n=== PROCESS LIST ===\r\n{outp[1]}\r\n=== CONNECTION LIST ===\r\n{outp[2]}\r\n=== SESSION LIST ===\r\n{outp[3]}", new UTF8Encoding(true));
-                if (result.Sessions.Count == 0) Log("RAC подключён, но session list пуст. Диагностика: " + Path.Combine(diagnosticDir, "last-rac-diagnostic.txt"));
-            }
-            catch { }
-        }
         return result;
-        void AddLink(string kind, string value, ConnectionLink link) { var key = N(value); if (key.Length > 0) connectionLinks[$"{kind}:{key}"] = link; }
+        static bool IsMeaningfulId(string id) => id.Length > 0 && id != "0" && !id.Contains("00000000-0000-0000-0000-000000000000");
+        void AddLink(string kind, string value, ConnectionLink link, string? id = null) { var key = N(value); if (IsMeaningfulId(id ?? key)) connectionLinks[$"{kind}:{key}"] = link; }
         ConnectionLink? FindLink(Record s)
         {
-            var keys = new[] { $"uuid:{N(s.Get("connection"))}", $"id:{N(s.Get("conn-id"))}", $"id:{N(s.Get("connection-id"))}", $"session:{N(s.Get("session-number"))}" };
-            foreach (var key in keys)
-                if (!key.EndsWith(':') && !key.Contains("00000000-0000-0000-0000-000000000000") && connectionLinks.TryGetValue(key, out var found)) return found;
+            // Номер самого сеанса в session list называется session-id (раньше здесь искалось несуществующее session-number).
+            var sessionNumber = N(Empty(s.Get("session-id"), s.Get("session-number")));
+            var keys = new[] { ("uuid", N(s.Get("connection")), ""), ("id", N(s.Get("conn-id")), ""), ("id", N(s.Get("connection-id")), ""), ("session", sessionNumber, N(s.Get("infobase")) + ":") };
+            foreach (var (kind, id, scope) in keys)
+                if (IsMeaningfulId(id) && connectionLinks.TryGetValue($"{kind}:{scope}{id}", out var found)) return found;
 
             // В этой версии платформы у ожидающего сеанса поля connection/process равны нулевому UUID.
             // Восстанавливаем связь по базе, клиентскому компьютеру, приложению и времени открытия.
@@ -870,19 +984,32 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         }
     }
 
-    private static async Task<string> RunAsync(string exe, IEnumerable<string> args, int timeoutSeconds = 15)
+    // Запуск процесса, ожидание и декодирование вывода выполняются в пуле потоков, а не в UI-потоке.
+    private static Task<string> RunAsync(string exe, IEnumerable<string> args, int timeoutSeconds = 15)
+    {
+        var arguments = args.ToList();
+        return Task.Run(() => RunCoreAsync(exe, arguments, timeoutSeconds));
+    }
+
+    private static async Task<string> RunCoreAsync(string exe, List<string> args, int timeoutSeconds)
     {
         // Не используем StandardOutput.ReadToEndAsync(): StreamReader декодирует поток
         // до того, как можно определить фактическую кодировку rac.exe.
+        var name = Path.GetFileName(exe);
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi) ?? throw new Exception("Не удалось запустить rac.exe");
+        using var p = Process.Start(psi) ?? throw new Exception($"Не удалось запустить {name}");
         var stdout = ReadBytesAsync(p.StandardOutput.BaseStream);
         var stderr = ReadBytesAsync(p.StandardError.BaseStream);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        try { await p.WaitForExitAsync(cts.Token); } catch { try { p.Kill(true); } catch { } throw new Exception($"Превышено время ожидания {Path.GetFileName(exe)}: {timeoutSeconds} с"); }
-        var o = DecodeRac(await stdout); var e = DecodeRac(await stderr);
-        if (p.ExitCode != 0) throw new Exception(string.IsNullOrWhiteSpace(e) ? $"RAC завершился с кодом {p.ExitCode}" : e.Trim());
+        try { await p.WaitForExitAsync(cts.Token); }
+        catch { try { p.Kill(true); } catch { } throw new Exception($"Превышено время ожидания {name}: {timeoutSeconds} с"); }
+        byte[][] output;
+        // Каналы вывода может удерживать дочерний процесс; без ограничения чтение ждало бы его бесконечно.
+        try { output = await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(10)); }
+        catch (TimeoutException) { try { p.Kill(true); } catch { } throw new Exception($"{name} завершился, но не закрыл потоки вывода"); }
+        var o = DecodeRac(output[0]); var e = DecodeRac(output[1]);
+        if (p.ExitCode != 0) throw new Exception(string.IsNullOrWhiteSpace(e) ? $"{name} завершился с кодом {p.ExitCode}" : e.Trim());
         return o;
     }
 
@@ -935,7 +1062,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         try
         {
-            var rac = FindRac() ?? throw new Exception("Сначала укажите путь к rac.exe");
+            var rac = await Task.Run(() => FindRac()) ?? throw new Exception("Сначала укажите путь к rac.exe");
             var ras = Path.Combine(Path.GetDirectoryName(rac)!, "ras.exe");
             if (!File.Exists(ras)) throw new Exception("ras.exe не найден рядом с rac.exe");
             var timeout = Math.Max(30, (int)Settings.RacTimeoutSeconds);
@@ -952,18 +1079,21 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 catch { }
             }
 
-            var port = Settings.Endpoint.Split(':').LastOrDefault() ?? "1545";
+            // Порт берётся только из корректного «хост:порт»; раньше адрес без порта давал --port=<имя хоста>.
+            var endpointParts = Settings.Endpoint.Trim().Split(':');
+            var port = endpointParts.Length > 1 && int.TryParse(endpointParts[^1], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedPort) && parsedPort is > 0 and < 65536 ? parsedPort.ToString(CultureInfo.InvariantCulture) : "1545";
+            var agent = string.IsNullOrWhiteSpace(Settings.AgentEndpoint) ? "localhost:1540" : Settings.AgentEndpoint.Trim();
             var psi = new ProcessStartInfo(ras) { UseShellExecute = false, CreateNoWindow = true };
-            psi.ArgumentList.Add("cluster"); psi.ArgumentList.Add($"--port={port}"); psi.ArgumentList.Add(Settings.AgentEndpoint);
-            var rasProcess = Process.Start(psi) ?? throw new Exception("Не удалось запустить ras.exe");
-            RacStatus = $"RAS запускается: {ras} → {Settings.AgentEndpoint}, порт {port}…";
+            psi.ArgumentList.Add("cluster"); psi.ArgumentList.Add($"--port={port}"); psi.ArgumentList.Add(agent);
+            using var rasProcess = Process.Start(psi) ?? throw new Exception("Не удалось запустить ras.exe");
+            RacStatus = $"RAS запускается: {ras} → {agent}, порт {port}…";
             Log(RacStatus);
 
             var deadline = DateTime.UtcNow.AddSeconds(timeout);
             Exception? last = null;
             while (DateTime.UtcNow < deadline)
             {
-                if (rasProcess.HasExited) throw new Exception($"ras.exe завершился с кодом {rasProcess.ExitCode}. Проверьте порт {port}, адрес агента {Settings.AgentEndpoint} и совпадение версии платформы.");
+                if (rasProcess.HasExited) throw new Exception($"ras.exe завершился с кодом {rasProcess.ExitCode}. Проверьте порт {port}, адрес агента {agent} и совпадение версии платформы.");
                 await Task.Delay(2000);
                 foreach (var endpoint in EndpointCandidates(Settings.Endpoint))
                 {
@@ -973,14 +1103,14 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                         if (ParseRecords(output).Count > 0)
                         {
                             Settings.Endpoint = endpoint;
-                            RacStatus = $"RAS готов: {endpoint} · агент {Settings.AgentEndpoint}"; Log(RacStatus); await RefreshAsync(true); return;
+                            RacStatus = $"RAS готов: {endpoint} · агент {agent}"; Log(RacStatus); await RefreshAsync(true); return;
                         }
                     }
                     catch (Exception ex) { last = ex; }
                 }
                 RacStatus = $"Ожидание RAS… осталось {Math.Max(0, (deadline - DateTime.UtcNow).TotalSeconds):0} с";
             }
-            throw new Exception($"RAS не ответил за {timeout} с. RAC: {rac}; RAS: {ras}; конечная точка: {Settings.Endpoint}; агент: {Settings.AgentEndpoint}. Последняя ошибка: {last?.Message}");
+            throw new Exception($"RAS не ответил за {timeout} с. RAC: {rac}; RAS: {ras}; конечная точка: {Settings.Endpoint}; агент: {agent}. Последняя ошибка: {last?.Message}");
         }
         catch (Exception ex) { RacStatus = "Ошибка запуска RAS: " + ex.Message; Log(RacStatus); }
     }
@@ -997,19 +1127,32 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         var found = FindRacCandidates().FirstOrDefault();
         if (found != null) return found;
-        _racCandidatesCachedAt = DateTime.MinValue;
+        _racCandidatesStale = true;
         return FindRacCandidates().FirstOrDefault();
     }
 
     private List<string> FindRacCandidates()
     {
+        // Поиск вызывается и из фонового опроса, и из команды «Запустить RAS».
+        lock (_racCandidatesLock)
+        {
+            // Последний успешно подключившийся комплект всегда проверяется первым — в том числе из кэша,
+            // иначе нерабочий первый кандидат впустую запускался бы при каждом опросе.
+            return FindRacCandidatesLocked().OrderBy(x => !string.Equals(x, _lastRacPath, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+    }
+
+    private List<string> FindRacCandidatesLocked()
+    {
         var result = new List<string>();
         if (!OperatingSystem.IsWindows()) return result;
-        if (DateTime.UtcNow - _racCandidatesCachedAt < TimeSpan.FromMinutes(10) && _cachedRacCandidates.All(File.Exists))
+        if (!_racCandidatesStale && DateTime.UtcNow - _racCandidatesCachedAt < TimeSpan.FromMinutes(10) && _cachedRacCandidates.All(File.Exists))
             return new List<string>(_cachedRacCandidates);
+        _racCandidatesStale = false;
 
-        // Последний успешно подключившийся комплект сохраняется и проверяется первым.
-        Add(Settings.RacPath);
+        // Путь, указанный в настройках (или сохранённый после успешного подключения), проверяется первым.
+        // Для него ras.exe рядом не требуется: rac.exe может подключаться к RAS, запущенному службой или на другом сервере.
+        Add(Settings.RacPath.Trim().Trim('"'), requireRas: false);
 
         // Затем читаем ImagePath служб ragent прямо из обеих ветвей реестра.
         // Это работает даже когда 32-битный монитор не может прочитать MainModule 64-битного процесса.
@@ -1051,7 +1194,6 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             }
         }
 
-        Add(Settings.RacPath);
         Add(Path.Combine(AppContext.BaseDirectory, "rac.exe"));
 
         // InstallLocation из списка установленных программ помогает при нестандартном каталоге.
@@ -1098,7 +1240,9 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         foreach (var root in roots.Where(Directory.Exists))
         {
             AddFromDirectory(Path.Combine(root, "1cv8"));
-            if (Path.GetFileName(root).Equals("1cv8", StringComparison.OrdinalIgnoreCase)) AddFromDirectory(root);
+            // Каталоги вида D:\1cv8 и D:\1C просматриваются и сами (обход ограничен глубиной и числом папок).
+            var rootName = Path.GetFileName(root);
+            if (rootName.Equals("1cv8", StringComparison.OrdinalIgnoreCase) || rootName.Equals("1C", StringComparison.OrdinalIgnoreCase) || rootName.Equals("1С", StringComparison.OrdinalIgnoreCase)) AddFromDirectory(root);
         }
         _cachedRacCandidates.Clear(); _cachedRacCandidates.AddRange(result); _racCandidatesCachedAt = DateTime.UtcNow;
         return result;
@@ -1128,13 +1272,35 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             try { return Version.TryParse(FileVersionInfo.GetVersionInfo(path).FileVersion?.Split(' ')[0], out var version) ? version : new Version(); }
             catch { return new Version(); }
         }
-        void Add(string? path) { if (!string.IsNullOrWhiteSpace(path) && File.Exists(path) && File.Exists(Path.Combine(Path.GetDirectoryName(path)!, "ras.exe")) && !result.Contains(path, StringComparer.OrdinalIgnoreCase)) result.Add(path); }
+        void Add(string? path, bool requireRas = true) { if (!string.IsNullOrWhiteSpace(path) && File.Exists(path) && (!requireRas || File.Exists(Path.Combine(Path.GetDirectoryName(path)!, "ras.exe"))) && !result.Contains(path, StringComparer.OrdinalIgnoreCase)) result.Add(path); }
     }
 
-    private static string ArchitectureLabel(string executable)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> ArchitectureCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Разрядность исполняемого файла. Читается из заголовка PE (один раз на файл), а не угадывается по папке.</summary>
+    internal static string ArchitectureLabel(string executable)
     {
+        if (ArchitectureCache.TryGetValue(executable, out var cached)) return cached;
+        var label = ReadPeArchitecture(executable);
+        if (label != null) { ArchitectureCache[executable] = label; return label; }
         var x86Folder = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-        return !string.IsNullOrEmpty(x86Folder) && executable.StartsWith(x86Folder, StringComparison.OrdinalIgnoreCase) ? "x86" : Environment.Is64BitOperatingSystem ? "x64/не определено" : "x86 OS";
+        return !string.IsNullOrEmpty(x86Folder) && executable.StartsWith(x86Folder, StringComparison.OrdinalIgnoreCase) ? "x86" : Environment.Is64BitOperatingSystem ? "разрядность не определена" : "x86";
+    }
+
+    internal static string? ReadPeArchitecture(string executable)
+    {
+        try
+        {
+            using var stream = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new BinaryReader(stream);
+            if (stream.Length < 0x40 || reader.ReadUInt16() != 0x5A4D) return null; // "MZ"
+            stream.Position = 0x3C; var peOffset = reader.ReadInt32();
+            if (peOffset <= 0 || peOffset + 6 > stream.Length) return null;
+            stream.Position = peOffset;
+            if (reader.ReadUInt32() != 0x00004550) return null; // "PE\0\0"
+            return reader.ReadUInt16() switch { 0x014C => "x86", 0x8664 => "x64", 0xAA64 => "ARM64", _ => null };
+        }
+        catch { return null; }
     }
 
     private static void AppendDailyHistory(IEnumerable<ProcessRow> rows, DiskSnapshot disk, NetworkSnapshot network, DateTime at)
@@ -1194,16 +1360,39 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private static string H(string? value) => System.Net.WebUtility.HtmlEncode(value ?? "");
     private static string RiskCss(int risk) => risk >= 80 ? "critical" : risk >= 50 ? "warn" : risk >= 20 ? "warn" : "ok";
 
+    // Может вызываться из любого потока (фоновый опрос RAC, техжурнал).
     private void LogOnce(string key, string text, TimeSpan repeatAfter)
     {
         var now = DateTime.Now;
-        if (_lastAlertEmission.TryGetValue("log:" + key, out var last) && now - last < repeatAfter) return;
-        _lastAlertEmission["log:" + key] = now; Log(text);
+        lock (_logOnce)
+        {
+            if (_logOnce.TryGetValue(key, out var last) && now - last < repeatAfter) return;
+            if (_logOnce.Count > 500) foreach (var old in _logOnce.Where(x => now - x.Value > TimeSpan.FromHours(1)).Select(x => x.Key).ToList()) _logOnce.Remove(old);
+            _logOnce[key] = now;
+        }
+        Log(text);
     }
 
+    // Потокобезопасно. Несколько записей подряд дают одно обновление текста на вкладке «Журнал».
     private void Log(string text)
     {
-        Dispatcher.UIThread.Post(() => { _log.AppendLine($"[{DateTime.Now:dd.MM.yyyy HH:mm:ss}] {text}"); if (_log.Length > 100000) _log.Remove(0, 20000); LogText = _log.ToString(); });
+        lock (_logLock)
+        {
+            _log.Append('[').Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss")).Append("] ").AppendLine(text);
+            if (_log.Length > 100000)
+            {
+                var cut = 20000; while (cut < _log.Length && _log[cut - 1] != '\n') cut++; // отбрасываем старые записи целыми строками
+                _log.Remove(0, cut);
+            }
+            if (_logFlushPending) return;
+            _logFlushPending = true;
+        }
+        Dispatcher.UIThread.Post(() =>
+        {
+            string snapshot;
+            lock (_logLock) { _logFlushPending = false; snapshot = _log.ToString(); }
+            LogText = snapshot;
+        });
     }
     private static List<Record> ParseRecords(string text)
     {
@@ -1252,18 +1441,20 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
 public sealed class MonitorSettings : NotifyBase
 {
+    // Строковые свойства не принимают null: его может прислать очищенное поле ввода или повреждённый settings.json.
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
     private bool _autoDailyReport = true, _autoDrainEnabled = false;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30;
-    public string RacPath { get => _racPath; set => Set(ref _racPath, value); }
-    public string Endpoint { get => _endpoint; set => Set(ref _endpoint, value); }
-    public string AgentEndpoint { get => _agentEndpoint; set => Set(ref _agentEndpoint, value); }
-    public string ClusterUser { get => _clusterUser; set => Set(ref _clusterUser, value); }
-    public string ClusterPassword { get => _clusterPassword; set => Set(ref _clusterPassword, value); }
-    public string TechLogPath { get => _techLogPath; set => Set(ref _techLogPath, value); }
-    public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
-    public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value); }
+    public string RacPath { get => _racPath; set => Set(ref _racPath, value ?? ""); }
+    public string Endpoint { get => _endpoint; set => Set(ref _endpoint, value ?? ""); }
+    public string AgentEndpoint { get => _agentEndpoint; set => Set(ref _agentEndpoint, value ?? ""); }
+    public string ClusterUser { get => _clusterUser; set => Set(ref _clusterUser, value ?? ""); }
+    // Пароль администратора кластера хранится только в памяти и в settings.json не записывается.
+    [JsonIgnore] public string ClusterPassword { get => _clusterPassword; set => Set(ref _clusterPassword, value ?? ""); }
+    public string TechLogPath { get => _techLogPath; set => Set(ref _techLogPath, value ?? ""); }
+    public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value ?? ""); }
+    public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value ?? ""); }
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
     public List<string> BackgroundJobsDisabledInfobases { get; set; } = new();
     public bool AutoDrainEnabled { get => _autoDrainEnabled; set => Set(ref _autoDrainEnabled, value); }
@@ -1283,7 +1474,15 @@ public sealed class MonitorSettings : NotifyBase
     public decimal DiskAlert { get => _diskAlert; set => Set(ref _diskAlert, value); }
     private static string FileName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor", "settings.json");
     public static MonitorSettings Load() { try { if (File.Exists(FileName)) return JsonSerializer.Deserialize<MonitorSettings>(File.ReadAllText(FileName)) ?? new(); } catch { } return new(); }
-    public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; ClusterPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; } }
+    public void Save()
+    {
+        var file = FileName; Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        // Запись через временный файл: сбой посреди записи не оставит повреждённый settings.json
+        // (в нём хранится и список баз, фоновые задания которых выключал монитор).
+        var temp = file + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(temp, file, true);
+    }
 }
 
 public sealed class ProcessRow
@@ -1365,6 +1564,7 @@ internal sealed class DiskPerformanceMonitor : IDisposable
     private const uint PdhFmtDouble = 0x00000200;
     private IntPtr _query, _usage, _read, _write, _queue;
     private bool _ready, _disposed;
+    private readonly object _sync = new(); // Sample() выполняется в пуле потоков, Dispose() — в UI-потоке при выходе
 
     public DiskPerformanceMonitor()
     {
@@ -1384,29 +1584,36 @@ internal sealed class DiskPerformanceMonitor : IDisposable
 
     public DiskSnapshot Sample()
     {
-        if (!_ready || _disposed) return default;
-        try
+        lock (_sync)
         {
-            if (PdhCollectQueryData(_query) != 0) return default;
-            if (!TryValue(_usage, out var usage)) return default;
-            TryValue(_read, out var read); TryValue(_write, out var write); TryValue(_queue, out var queue);
-            return new(true, Math.Clamp(usage, 0, 100), Math.Max(0, read), Math.Max(0, write), Math.Max(0, queue));
+            if (!_ready || _disposed) return default;
+            try
+            {
+                if (PdhCollectQueryData(_query) != 0) return default;
+                if (!TryValue(_usage, out var usage)) return default;
+                TryValue(_read, out var read); TryValue(_write, out var write); TryValue(_queue, out var queue);
+                return new(true, Math.Clamp(usage, 0, 100), Math.Max(0, read), Math.Max(0, write), Math.Max(0, queue));
+            }
+            catch { return default; }
         }
-        catch { return default; }
     }
 
     private static bool TryValue(IntPtr counter, out double value)
     {
         value = 0; if (counter == IntPtr.Zero) return false;
         var result = PdhGetFormattedCounterValue(counter, PdhFmtDouble, out _, out var formatted);
-        if (result != 0 || formatted.CStatus != 0 || double.IsNaN(formatted.DoubleValue) || double.IsInfinity(formatted.DoubleValue)) return false;
+        // PDH_CSTATUS_VALID_DATA (0) и PDH_CSTATUS_NEW_DATA (1) — оба означают корректное значение.
+        if (result != 0 || formatted.CStatus > 1 || double.IsNaN(formatted.DoubleValue) || double.IsInfinity(formatted.DoubleValue)) return false;
         value = formatted.DoubleValue; return true;
     }
 
     public void Dispose()
     {
-        if (_disposed) return; _disposed = true;
-        if (_query != IntPtr.Zero) PdhCloseQuery(_query);
+        lock (_sync)
+        {
+            if (_disposed) return; _disposed = true;
+            if (_query != IntPtr.Zero) PdhCloseQuery(_query);
+        }
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 16)]

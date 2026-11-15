@@ -118,7 +118,7 @@
               <Button Content="Удалить ранние дубликаты" Command="{Binding TerminateDuplicateSessionsCommand}" Margin="0,0,10,10"/>
               <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10"/>
             </WrapPanel>
-            <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются." Classes="muted" TextWrapping="Wrap"/>
+            <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются. Фоновые задания и служебные соединения (COM, веб-сервисы, консоль кластера) дубликатами не считаются." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Фоновые и регламентные задания" FontSize="17" FontWeight="SemiBold"/>
