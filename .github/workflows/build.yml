@@ -164,7 +164,8 @@ jobs:
           python ../.github/scripts/go_test_report.py test-ui.json
           exit $code
 
-  # Запуск собранной программы на Windows: без OpenGL и с программным OpenGL (Mesa3D).
+  # Запуск собранной программы на Windows: без Mesa3D (ожидается сообщение об ошибке, шаг только
+  # сообщает результат) и с Mesa3D (главное окно обязано открыться).
   go-gui:
     name: Go + Fyne · запуск окна на Windows
     needs: go-build
@@ -190,49 +191,26 @@ jobs:
         shell: pwsh
         run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\1-system-opengl.png -Report -Note 'без Mesa3D'
 
-      # Пакет MinGW: в выпуске 26.2.6 пакет MSVC собран без драйверов OpenGL (известная ошибка).
+      # Версия Mesa3D закреплена. Пакет MinGW: пакет MSVC этого выпуска собран без драйверов OpenGL.
       - name: Download Mesa3D
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $release = Invoke-RestMethod https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
-          $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-[\d.]+-release-mingw\.7z$' } | Select-Object -First 1
-          if (-not $asset) { throw "архив Mesa3D не найден: $($release.assets.name -join ', ')" }
-          Invoke-WebRequest $asset.browser_download_url -OutFile mesa.7z
+          Invoke-WebRequest https://github.com/pal1000/mesa-dist-win/releases/download/26.2.6/mesa3d-26.2.6-release-mingw.7z -OutFile mesa.7z
           7z x mesa.7z -omesa -y | Out-Null
-          $names = (Get-ChildItem mesa\x64 -File -Filter *.dll | ForEach-Object { "$($_.Name) $([math]::Round($_.Length / 1MB, 1)) МБ" }) -join ', '
-          Write-Host "::notice title=Mesa3D::$($asset.name); каталоги: $((Get-ChildItem mesa -Directory).Name -join ', '); x64: $names"
           if (-not (Test-Path mesa\x64\opengl32.dll)) { throw 'в архиве нет x64\opengl32.dll' }
 
-      # Варианты подключения Mesa3D проверяются по очереди; результат каждого — в аннотации.
-      - name: Mesa beside the program
+      - name: Run with Mesa beside the program
         shell: pwsh
         run: |
-          foreach ($name in 'opengl32.dll', 'libgallium_wgl.dll', 'libglapi.dll', 'dxil.dll') {
-            if (Test-Path "mesa\x64\$name") { Copy-Item "mesa\x64\$name" app\ }
-          }
-          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\2-mesa-beside.png -Report -Note 'Mesa3D рядом с программой'
+          foreach ($name in 'opengl32.dll', 'libgallium_wgl.dll', 'dxil.dll') { Copy-Item "mesa\x64\$name" app\ }
+          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\2-mesa-beside.png -Note 'Mesa3D рядом с программой'
 
-      - name: Mesa beside the program, llvmpipe
-        shell: pwsh
-        env:
-          GALLIUM_DRIVER: llvmpipe
-        run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\3-mesa-llvmpipe.png -Report -Note 'Mesa3D рядом с программой, GALLIUM_DRIVER=llvmpipe'
-
-      - name: Mesa beside the program, .local
+      - name: Run with Mesa installed system-wide
         shell: pwsh
         run: |
-          Set-Content app\1C-Server-Monitor-Go.exe.local 'dummy'
-          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\4-mesa-local.png -Report -Note 'Mesa3D рядом с программой и файл .local'
-
-      - name: Mesa system-wide
-        shell: pwsh
-        run: |
-          Remove-Item app\*.dll, app\*.local
+          Remove-Item app\*.dll
           cmd /c "mesa\systemwidedeploy.cmd 1"
-          $installed = (Get-ChildItem $env:windir\System32\mesadrv.dll, $env:windir\System32\libgallium_wgl.dll -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
-          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\5-mesa-system.png -Report -Note "Mesa3D установлена в систему (systemwidedeploy.cmd 1); в System32: $installed"
+          .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\3-mesa-system.png -Note 'Mesa3D установлена в систему (systemwidedeploy.cmd 1)'
 
       # Снимки экрана — вспомогательные: их отсутствие не делает сборку неудачной.
       - name: Upload screenshots
