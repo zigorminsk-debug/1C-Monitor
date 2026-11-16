@@ -47,6 +47,8 @@ jobs:
   go-build:
     name: Go + Fyne · сборка win-x64 и win-x86
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # публикация предварительного выпуска go-preview
     defaults:
       run:
         working-directory: OneCMonitorGo
@@ -93,6 +95,14 @@ jobs:
           path: OneCServerMonitorGo-win-x64
           key: go-gui-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
+
+      # Сборка выкладывается в Releases: на них не действует квота хранилища артефактов.
+      - name: Publish pre-release go-preview
+        if: github.event_name != 'pull_request'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/publish_preview.sh
 
       - name: Upload win-x64
         uses: actions/upload-artifact@v4
@@ -180,18 +190,19 @@ jobs:
         shell: pwsh
         run: .github/scripts/run_gui.ps1 -Exe app\1C-Server-Monitor-Go.exe -Shot shots\1-system-opengl.png -Report -Note 'без Mesa3D'
 
+      # Пакет MinGW: в выпуске 26.2.6 пакет MSVC собран без драйверов OpenGL (известная ошибка).
       - name: Download Mesa3D
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $release = Invoke-RestMethod https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
-          $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-[\d.]+-release-msvc\.7z$' } | Select-Object -First 1
+          $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-[\d.]+-release-mingw\.7z$' } | Select-Object -First 1
           if (-not $asset) { throw "архив Mesa3D не найден: $($release.assets.name -join ', ')" }
           Invoke-WebRequest $asset.browser_download_url -OutFile mesa.7z
           7z x mesa.7z -omesa -y | Out-Null
-          $names = (Get-ChildItem mesa\x64 -File | ForEach-Object { $_.Name }) -join ', '
-          Write-Host "::notice title=Mesa3D::$($asset.name); x64: $names"
+          $names = (Get-ChildItem mesa\x64 -File -Filter *.dll | ForEach-Object { "$($_.Name) $([math]::Round($_.Length / 1MB, 1)) МБ" }) -join ', '
+          Write-Host "::notice title=Mesa3D::$($asset.name); каталоги: $((Get-ChildItem mesa -Directory).Name -join ', '); x64: $names"
           if (-not (Test-Path mesa\x64\opengl32.dll)) { throw 'в архиве нет x64\opengl32.dll' }
 
       # Варианты подключения Mesa3D проверяются по очереди; результат каждого — в аннотации.
