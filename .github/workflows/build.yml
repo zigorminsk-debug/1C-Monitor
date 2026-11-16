@@ -35,13 +35,30 @@ jobs:
           -p:PublishSingleFile=true
           -o publish/${{ matrix.rid }}
 
+      - name: Check the published program
+        shell: pwsh
+        run: |
+          $exe = Get-Item publish/${{ matrix.rid }}/1C-Server-Monitor.exe
+          if ($exe.Length -lt 10MB) { throw "файл программы слишком мал: $($exe.Length) байт" }
+          Write-Host "::notice title=.NET ${{ matrix.rid }}::1C-Server-Monitor.exe собран, $([math]::Round($exe.Length / 1MB, 1)) МБ"
+
+      # Хранилище артефактов аккаунта может быть заполнено («Artifact storage quota has been hit»).
+      # Сама сборка при этом исправна, поэтому отказ хранилища не делает задание неудачным, а даёт
+      # предупреждение. Для выпуска по метке v* артефакты обязательны.
       - name: Upload artifact
+        id: upload
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: 1C-Server-Monitor-${{ matrix.rid }}
           path: publish/${{ matrix.rid }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Warn that the artifact was not stored
+        if: steps.upload.outcome == 'failure'
+        shell: bash
+        run: echo "::warning title=Артефакт не сохранён::Сборка .NET ${{ matrix.rid }} выполнена, но GitHub не принял файлы в хранилище артефактов (обычно это заполненная квота). Скачать её из этого запуска нельзя."
 
   # Версия на Go + Fyne (каталог OneCMonitorGo).
   go-build:
@@ -104,7 +121,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/publish_preview.sh
 
+      # Хранилище артефактов аккаунта может быть заполнено («Artifact storage quota has been hit»).
+      # Сама сборка при этом исправна, поэтому отказ хранилища не делает задание неудачным, а даёт
+      # предупреждение. Для выпуска по метке v* артефакты обязательны.
       - name: Upload win-x64
+        id: upload64
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: 1C-Server-Monitor-Go-win-x64
@@ -113,12 +135,19 @@ jobs:
           retention-days: 7
 
       - name: Upload win-x86
+        id: upload86
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: 1C-Server-Monitor-Go-win-x86
           path: OneCServerMonitorGo-win-x86
           if-no-files-found: error
           retention-days: 7
+
+      - name: Warn that the artifact was not stored
+        if: steps.upload64.outcome == 'failure' || steps.upload86.outcome == 'failure'
+        shell: bash
+        run: echo "::warning title=Артефакт не сохранён::Версия Go + Fyne собрана, но GitHub не принял файлы в хранилище артефактов (обычно это заполненная квота). Файлы доступны в Releases, выпуск go-preview."
 
   # Вызовы Windows API проверяются на настоящей Windows для обеих разрядностей.
   go-windows-test:
