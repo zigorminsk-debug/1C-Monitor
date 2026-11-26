@@ -2,12 +2,22 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версионирование следует [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [1.4.0] — 2026-11-26
+
+### Добавлено
+- **Общая библиотека `OneCMonitor.Core`**: вынесены клиент `RacClient` (`rac.exe`/`ras.exe`, автоопределение кодировки), анализатор сеансов `SessionAnalyzer`, защита секретов Windows DPAPI `SecretProtector` и механизм автообновления `GitHubAutoUpdater`.
+- **Отдельная системная служба `OneCWatchdog` (`1C-Watchdog.exe`)**:
+  - Регистрация и работа как системной службы Windows (`LocalSystem`) с автозапуском и политикой восстановления SCM при сбоях.
+  - Мастер установки `--setup` с автоповышением прав UAC, настройкой защищённых NTFS ACL (`SYSTEM` + `Administrators`), регистрацией источника Event Log (`1CServerWatchdog`) и DPAPI-шифрованием учётных данных.
+  - Автоматическое отслеживание и завершение дублирующихся ранних сеансов и зависших сеансов (долгие вызовы, блокировки, длительные спящие сеансы), поддержка режима `DryRun`.
+  - Ежедневные ротируемые логи в `%ProgramData%\1CServerMonitor\logs` и запись событий в журнал Windows.
+  - PowerShell-обёртка установки `scripts/install-watchdog.ps1` и кнопка запуска установки службы из вкладки «Администрирование» в GUI.
+- **Автообновление с GitHub Releases**:
+  - Проверка новых версий на GitHub Releases, загрузка и верификация SHA-256 по `SHA256SUMS.txt`, безопасное фоновое обновление как для GUI (`1C-Server-Monitor.exe`), так и для службы Windows (`1C-Watchdog.exe`).
+  - Поддержка приватных репозиториев GitHub через DPAPI-защищённый токен доступа в настройках.
 
 ### Изменено
-- Репозиторий подготовлен к production-эксплуатации: добавлены `OneCMonitor.sln`, `.editorconfig`, шаблоны GitHub (`.github/`), политики безопасности и контрибьютинга, скрипт публикации `scripts/publish.ps1` и CI/CD-пайплайны GitHub Actions.
-- Обновлён `.gitignore` для .NET/Avalonia, из индекса удалены кэши сборки `OneCMonitor/obj/` и отладочные вложения `uploads/`.
-- В `OneCMonitor.csproj` свойства `SelfContained` и `PublishSingleFile` привязаны к наличию `RuntimeIdentifier`, чтобы `dotnet build` без `-r` работал корректно.
+- `OneCMonitor.sln`, `scripts/publish.ps1`, `.github/workflows/ci.yml` и `.github/workflows/release.yml` обновлены для совместной сборки и публикации `1C-Server-Monitor.exe` и `1C-Watchdog.exe` (`win-x64` и `win-x86`).
 
 ---
 
