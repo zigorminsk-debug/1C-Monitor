@@ -1,0 +1,54 @@
+name: Сообщение об ошибке
+description: Сообщить о проблеме в работе 1C Server Monitor
+title: "[Bug]: "
+labels: [ "bug" ]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Заполните информацию ниже — это поможет быстрее воспроизвести и устранить ошибку.
+        **Внимание:** перед прикреплением HTML-отчётов или `last-rac-diagnostic.txt` обезличьте имена пользователей, баз и внутренних серверов.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Описание проблемы
+      description: Что именно пошло не так и какое поведение ожидалось?
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: Версия 1C Server Monitor и разрядность
+      placeholder: "Например: 1.3.1 (win-x64)"
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: Операционная система сервера
+      placeholder: "Например: Windows Server 2019 / 2022"
+    validations:
+      required: true
+
+  - type: input
+    id: onec-version
+    attributes:
+      label: Версия платформы 1С:Предприятие и разрядность RAC/RAS
+      placeholder: "Например: 8.3.24.1548 (x64)"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Фрагмент вкладки «Журнал» или строка статуса RAC
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Предварительные проверки
+      options:
+        - label: Программа запущена от имени администратора
+        - label: Служба/процесс `ras.exe` запущен и доступен по порту (по умолчанию 1545)

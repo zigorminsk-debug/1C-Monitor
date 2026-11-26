@@ -1,0 +1,20 @@
+name: Предложение по улучшению
+description: Предложить новую функцию или доработку 1C Server Monitor
+title: "[Feature]: "
+labels: [ "enhancement" ]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу или проблему решает улучшение?
+      description: Опишите сценарий на сервере 1С, с которым вы сталкиваетесь.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+      description: Как это должно выглядеть в интерфейсе, отчётах или логике мониторинга?
+    validations:
+      required: true

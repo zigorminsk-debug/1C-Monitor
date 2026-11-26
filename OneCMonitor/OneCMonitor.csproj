@@ -13,8 +13,10 @@
     <Product>1C Server Monitor</Product>
     <Description>Мониторинг нагрузки сервера 1С, процессов rphost и пользовательских сеансов</Description>
     <Copyright>© 2026 Zakharevich Igor · csl.by</Copyright>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
+    <RepositoryUrl>https://github.com/zigorminsk-debug/1C-Monitor</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
   <ItemGroup>
