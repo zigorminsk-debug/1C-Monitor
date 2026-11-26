@@ -24,11 +24,11 @@ public sealed class WatchdogLogger
 
     public string CurrentLogFile => Path.Combine(_logDir, $"{_filePrefix}-{DateTime.Now:yyyy-MM-dd}.log");
 
-    public void Info(string message, bool eventLog = false) => Write("INFO", message, eventLog, EventLogEntryType.Information);
-    public void Warn(string message, bool eventLog = true) => Write("WARN", message, eventLog, EventLogEntryType.Warning);
-    public void Error(string message, bool eventLog = true) => Write("ERROR", message, eventLog, EventLogEntryType.Error);
+    public void Info(string message, bool eventLog = false) => Write("INFO", message, eventLog);
+    public void Warn(string message, bool eventLog = true) => Write("WARN", message, eventLog);
+    public void Error(string message, bool eventLog = true) => Write("ERROR", message, eventLog);
 
-    private void Write(string level, string message, bool writeEventLog, EventLogEntryType eventType)
+    private void Write(string level, string message, bool writeEventLog)
     {
         var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{level}] {message}";
         lock (_sync)
@@ -49,7 +49,7 @@ public sealed class WatchdogLogger
         }
 
         if (writeEventLog && OperatingSystem.IsWindows())
-            TryWriteEventLog(message, eventType);
+            TryWriteEventLog(message, level);
     }
 
     private void PruneOldLogsIfNeeded()
@@ -73,12 +73,20 @@ public sealed class WatchdogLogger
     }
 
     [SupportedOSPlatform("windows")]
-    private static void TryWriteEventLog(string message, EventLogEntryType type)
+    private static void TryWriteEventLog(string message, string level)
     {
         try
         {
             if (EventLog.SourceExists(WatchdogConfig.ServiceName))
+            {
+                var type = level switch
+                {
+                    "ERROR" => EventLogEntryType.Error,
+                    "WARN" => EventLogEntryType.Warning,
+                    _ => EventLogEntryType.Information
+                };
                 EventLog.WriteEntry(WatchdogConfig.ServiceName, message, type);
+            }
         }
         catch { }
     }
