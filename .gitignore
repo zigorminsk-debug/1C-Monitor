@@ -1,25 +1,100 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+## .NET / Visual Studio / Rider / VS Code / Avalonia
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Ll]og/
+[Ll]ogs/
+artifacts/
+publish/
+out/
+
+# Compiled binaries and packages
 *.exe
-*.exe~
 *.dll
-*.so
-*.dylib
+*.pdb
+*.nupkg
+*.snupkg
+*.appx
+*.msix
+*.appxbundle
+*.msixbundle
 
-# Test binary, built with `go test -c`
-*.test
+# NuGet / Paket / Restore caches
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.fragment.lock.json
+project.assets.json
+*.cache
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
+# Visual Studio / MSBuild / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.bak
+*.swp
+*~
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.vspscc
+*.vssscc
+.builds
+*.DotSettings.user
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Test & coverage results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+*.coverage
+*.coveragexml
 
-# Go workspace file
-go.work
-go.work.sum
+# User-generated runtime data / reports
+settings.json
+last-rac-diagnostic.txt
+history-*.csv
+1C-monitor-*.html
+1C-daily-*.html
 
-# env file
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment files
 .env
+.env.*
