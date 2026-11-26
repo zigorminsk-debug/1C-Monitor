@@ -31,7 +31,19 @@ jobs:
       - name: Build Release
         run: dotnet build OneCMonitor.sln --configuration Release --no-restore
 
-      - name: Publish self-contained single-file (${{ matrix.rid }})
+      - name: Publish 1C Watchdog (${{ matrix.rid }})
+        run: >
+          dotnet publish OneCWatchdog/OneCWatchdog.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -p:DebugSymbols=false
+          --output artifacts/OneCWatchdog-${{ matrix.rid }}
+
+      - name: Publish 1C Server Monitor (${{ matrix.rid }})
         run: >
           dotnet publish OneCMonitor/OneCMonitor.csproj
           --configuration Release
@@ -43,13 +55,22 @@ jobs:
           -p:DebugSymbols=false
           --output artifacts/OneCServerMonitor-${{ matrix.rid }}
 
-      - name: Generate SHA-256 checksum
+      - name: Bundle Watchdog & generate SHA-256 checksums
         shell: pwsh
         run: |
-          $exe = "artifacts/OneCServerMonitor-${{ matrix.rid }}/1C-Server-Monitor.exe"
-          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  1C-Server-Monitor.exe" | Set-Content -Path "artifacts/OneCServerMonitor-${{ matrix.rid }}/SHA256.txt" -Encoding UTF8
-          Get-Content "artifacts/OneCServerMonitor-${{ matrix.rid }}/SHA256.txt"
+          $monitorDir = "artifacts/OneCServerMonitor-${{ matrix.rid }}"
+          $watchdogDir = "artifacts/OneCWatchdog-${{ matrix.rid }}"
+          Copy-Item "$watchdogDir/1C-Watchdog.exe" "$monitorDir/1C-Watchdog.exe" -Force
+
+          $mExe = "$monitorDir/1C-Server-Monitor.exe"
+          $wExe = "$watchdogDir/1C-Watchdog.exe"
+          $mHash = (Get-FileHash -Path $mExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $wHash = (Get-FileHash -Path $wExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "$mHash  1C-Server-Monitor.exe"
+            "$wHash  1C-Watchdog.exe"
+          ) | Set-Content -Path "$monitorDir/SHA256.txt" -Encoding UTF8
+          Get-Content "$monitorDir/SHA256.txt"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

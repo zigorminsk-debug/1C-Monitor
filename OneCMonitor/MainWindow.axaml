@@ -1,16 +1,17 @@
 <Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" x:Class="OneCMonitor.MainWindow" Title="{Binding WindowTitle}" Icon="/Assets/app.ico" Width="1450" Height="900" MinWidth="1050" MinHeight="680" mc:Ignorable="d">
   <Grid RowDefinitions="138,*,72">
     <Border Grid.Row="0" Background="#111A29" BorderBrush="#273449" BorderThickness="0,0,0,1" Padding="20,10">
-      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="12">
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="12">
         <Border Background="#263B22" CornerRadius="8" Padding="11,7" VerticalAlignment="Center"><TextBlock Text="1C" Foreground="#FACC15" FontSize="20" FontWeight="Bold"/></Border>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
           <TextBlock Text="{Binding ServerHeaderTitle}" FontWeight="SemiBold" FontSize="24"/>
           <TextBlock Text="{Binding ServerHeaderDetails}" Foreground="#B8C7DB" FontSize="13" LineHeight="19" TextWrapping="Wrap" MaxLines="5"/>
         </StackPanel>
-        <TextBlock Grid.Column="2" Text="{Binding Status}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{Binding StatusColor}" MaxWidth="380" TextWrapping="Wrap" ToolTip.Tip="{Binding Status}"/>
-        <Button Grid.Column="3" Content="Обновить" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
-        <Button Grid.Column="4" Content="Отчёт HTML" Command="{Binding ExportCommand}" VerticalAlignment="Center"/>
-        <ToggleSwitch Grid.Column="5" IsChecked="{Binding IsRunning}" OnContent="Мониторинг" OffContent="Пауза" VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="2" Text="{Binding Status}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{Binding StatusColor}" MaxWidth="360" TextWrapping="Wrap" ToolTip.Tip="{Binding Status}"/>
+        <Button Grid.Column="3" Content="Установить обновление" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#065F46" VerticalAlignment="Center"/>
+        <Button Grid.Column="4" Content="Обновить" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
+        <Button Grid.Column="5" Content="Отчёт HTML" Command="{Binding ExportCommand}" VerticalAlignment="Center"/>
+        <ToggleSwitch Grid.Column="6" IsChecked="{Binding IsRunning}" OnContent="Мониторинг" OffContent="Пауза" VerticalAlignment="Center"/>
       </Grid>
     </Border>
 
@@ -137,6 +138,13 @@
             </WrapPanel>
             <TextBlock Text="Для плавного вывода сначала выберите строку процесса на вкладке «Обзор». Команда process turn-off прекращает назначение новой нагрузки, но не убивает текущие вызовы. Службы определяются по ragent.exe в PathName. Красная кнопка rphost выполняет taskkill /F /IM rphost.exe." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Автономная служба контроля сеансов (1C Watchdog)" FontSize="17" FontWeight="SemiBold"/>
+            <WrapPanel Orientation="Horizontal">
+              <Button Content="Установить / настроить службу 1C Watchdog (LocalSystem)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,10" Background="#1D4ED8"/>
+            </WrapPanel>
+            <TextBlock Text="Запускает мастер 1C-Watchdog.exe --setup с запросом прав администратора (UAC): регистрирует системную службу Windows от имени LocalSystem с автозапуском и автовосстановлением, настраивает защищённые права NTFS, журнал событий Windows и ротацию логов в %ProgramData%\1CServerMonitor\logs, а также автоматически завершает дублирующиеся и зависшие сеансы 1С." Classes="muted" TextWrapping="Wrap"/>
+          </StackPanel></Border>
         </StackPanel></ScrollViewer>
       </TabItem>
 
@@ -191,6 +199,22 @@
               <TextBlock Grid.Row="1" Text="RAM процесса, МБ"/><NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Settings.MemoryAlertMb}" Minimum="256" Maximum="131072" Increment="256"/>
               <TextBlock Grid.Row="2" Text="Средний вызов, мс"/><NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding Settings.CallAlertMs}" Minimum="100" Maximum="600000" Increment="500"/>
               <TextBlock Grid.Row="3" Text="Загрузка диска, %"/><NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding Settings.DiskAlert}" Minimum="10" Maximum="100"/></Grid>
+          </StackPanel></Border>
+          <Border Classes="card"><StackPanel Spacing="10">
+            <TextBlock Text="Автообновление с GitHub Releases" FontSize="17" FontWeight="SemiBold"/>
+            <ToggleSwitch IsChecked="{Binding Settings.AutoUpdateEnabled}" OnContent="Автопроверка обновлений включена" OffContent="Автопроверка обновлений выключена"/>
+            <ToggleSwitch IsChecked="{Binding Settings.AutoUpdateInstallAutomatically}" OnContent="Устанавливать новые версии автоматически с проверкой SHA-256" OffContent="Только уведомлять о новой версии"/>
+            <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+              <TextBlock Text="Интервал проверки, часов" VerticalAlignment="Center"/><NumericUpDown Grid.Column="1" Value="{Binding Settings.AutoUpdateCheckHours}" Minimum="1" Maximum="168"/>
+              <TextBlock Grid.Row="1" Text="Владелец репозитория" VerticalAlignment="Center"/><TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Settings.GitHubOwner}" Watermark="zigorminsk-debug"/>
+              <TextBlock Grid.Row="2" Text="Репозиторий GitHub" VerticalAlignment="Center"/><TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Settings.GitHubRepository}" Watermark="1C-Monitor"/>
+              <TextBlock Grid.Row="3" Text="GitHub Token (для приватного репо)" VerticalAlignment="Center"/><TextBox Grid.Row="3" Grid.Column="1" Text="{Binding Settings.GitHubToken}" PasswordChar="●" Watermark="Необязательно; шифруется через Windows DPAPI"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <Button Content="Проверить обновления" Command="{Binding CheckUpdatesCommand}"/>
+              <Button Content="Обновить и перезапустить" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#065F46"/>
+              <TextBlock Text="{Binding UpdateStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="420" TextWrapping="Wrap"/>
+            </StackPanel>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="8">
             <TextBlock Text="О программе" FontSize="17" FontWeight="SemiBold"/>

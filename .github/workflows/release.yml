@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.3.1)'
+        description: 'Release tag (e.g. v1.4.0)'
         required: true
 
 permissions:
@@ -39,4 +39,6 @@ jobs:
           files: |
             artifacts/OneCServerMonitor-win-x64.zip
             artifacts/OneCServerMonitor-win-x86.zip
+            artifacts/OneCWatchdog-win-x64.zip
+            artifacts/OneCWatchdog-win-x86.zip
             artifacts/SHA256SUMS.txt
