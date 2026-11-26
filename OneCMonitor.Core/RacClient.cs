@@ -202,162 +202,226 @@ public sealed class RacClient
         catch { clusterOutput = await RunAsync(rac, new[] { endpoint, "cluster", "list" }, timeout, cancellationToken); }
 
         var clusters = ParseRecords(clusterOutput);
-        var clusterIds = clusters.Select(x => RacHelpers.Normalize(x.Get("cluster")))
-            .Where(x => x.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var clusterNames = clusters
+            .Select(x => new { Id = RacHelpers.Normalize(x.Get("cluster")), Name = x.Get("name") })
+            .Where(x => x.Id.Length > 0)
+            .GroupBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.OrdinalIgnoreCase);
+
+        var targetFilter = (options.TargetClusters ?? new List<string>())
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var clusterIds = clusterNames.Keys
+            .Where(id => targetFilter.Count == 0 ||
+                         targetFilter.Contains(id) ||
+                         (clusterNames.TryGetValue(id, out var nm) && targetFilter.Contains(nm.Trim())))
             .OrderByDescending(x => x.Equals(_lastClusterId, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         if (clusterIds.Count == 0)
             throw new Exception("Кластер не найден. Проверьте RAS, порт 1545 и версию RAC.");
 
-        string? cluster = null;
-        string sessionOutput = "";
-        var bestSessionCount = -1;
-        Exception? clusterError = null;
-
-        foreach (var candidateCluster in clusterIds)
-        {
-            try
-            {
-                var candidateSessions = await RunListAsync(new[] { "session", "list" }, candidateCluster);
-                var count = ParseRecords(candidateSessions).Count;
-                log?.Invoke($"RAC: кластер {candidateCluster}, найдено сеансов: {count}");
-                if (count > bestSessionCount)
-                {
-                    bestSessionCount = count;
-                    cluster = candidateCluster;
-                    sessionOutput = candidateSessions;
-                }
-                if (count > 0 && candidateCluster.Equals(_lastClusterId, StringComparison.OrdinalIgnoreCase)) break;
-            }
-            catch (Exception ex)
-            {
-                clusterError = ex;
-                log?.Invoke($"RAC: кластер {candidateCluster} недоступен: {ex.Message}");
-            }
-        }
-
-        if (cluster == null)
-            throw new Exception("Не удалось прочитать сеансы ни одного кластера: " + clusterError?.Message);
-
-        _lastClusterId = cluster;
-
-        var infobaseOut = await TryListAsync(new[] { "infobase", "summary", "list" }, cluster);
-        var processOut = await TryListAsync(new[] { "process", "list" }, cluster);
-        var connectionOut = await TryListAsync(new[] { "connection", "list" }, cluster);
-
-        var ibRecords = ParseRecords(infobaseOut);
-        var ib = ibRecords.Where(x => RacHelpers.Normalize(x.Get("infobase")).Length > 0)
-            .GroupBy(x => RacHelpers.Normalize(x.Get("infobase")))
-            .ToDictionary(x => x.Key, x => x.First().Get("name"));
-        var pr = ParseRecords(processOut);
-        var cn = ParseRecords(connectionOut);
-        var ss = ParseRecords(sessionOutput);
-
-        var procUuidToPid = pr.Where(x => RacHelpers.ParseInt(x.Get("pid")) > 0)
-            .GroupBy(x => RacHelpers.Normalize(x.Get("process")))
-            .ToDictionary(x => x.Key, x => RacHelpers.ParseInt(x.First().Get("pid")));
-
-        var connectionLinks = new Dictionary<string, ConnectionLink>();
-        var connectionCandidates = new List<ConnectionLink>();
-        foreach (var c in cn)
-        {
-            var pid = RacHelpers.ParseInt(c.Get("pid"));
-            if (pid <= 0) procUuidToPid.TryGetValue(RacHelpers.Normalize(c.Get("process")), out pid);
-            if (pid <= 0) pid = RacHelpers.ParseInt(c.Get("process-id"));
-            var link = new ConnectionLink(
-                pid,
-                RacHelpers.EmptyFallback(c.Get("current-service-call"), c.Get("current-service-name")),
-                c.Get("current-dbms-request"),
-                RacHelpers.Normalize(c.Get("host")),
-                RacHelpers.Normalize(c.Get("infobase")),
-                RacHelpers.Normalize(c.Get("application")),
-                RacHelpers.ParseRacDate(c.Get("connected-at")),
-                RacHelpers.ParseInt(c.Get("conn-id")));
-            connectionCandidates.Add(link);
-            AddLink("uuid", c.Get("connection"), link);
-            AddLink("id", c.Get("conn-id"), link);
-            AddLink("id", c.Get("connection-id"), link);
-            AddLink("session", c.Get("session-number"), link);
-        }
-
         var result = new RacSnapshot
         {
             RacPath = rac,
             Endpoint = endpoint,
-            ClusterId = cluster,
-            ClusterOutput = clusterOutput,
-            InfoBaseOutput = infobaseOut,
-            ProcessOutput = processOut,
-            ConnectionOutput = connectionOut,
-            SessionOutput = sessionOutput
+            ClusterOutput = clusterOutput
         };
         result.ClusterIds.AddRange(clusterIds);
 
-        foreach (var b in ibRecords)
-        {
-            var uuid = RacHelpers.Normalize(b.Get("infobase"));
-            if (uuid.Length == 0) continue;
-            result.InfoBases[uuid] = new InfoBaseRef(uuid, RacHelpers.EmptyFallback(b.Get("name"), uuid), RacHelpers.IsTrue(b.Get("scheduled-jobs-deny")));
-        }
+        var selectedClusterSnapshots = new List<(string ClusterId, string ClusterName, string SessionOut, string InfobaseOut, string ProcessOut, string ConnectionOut)>();
+        Exception? clusterError = null;
 
-        foreach (var p in pr)
+        if (options.MonitorAllClusters)
         {
-            var pid = RacHelpers.ParseInt(p.Get("pid"));
-            if (pid <= 0) continue;
-            result.Processes[pid] = new RacProcess(
-                pid,
-                RacHelpers.Normalize(p.Get("process")),
-                RacHelpers.ParseNum(p.Get("memory-size")) / 1024d,
-                RacHelpers.ParseNum(p.Get("avg-call-time")) * 1000d,
-                RacHelpers.ParseNum(p.Get("avg-db-call-time")) * 1000d);
-        }
-
-        foreach (var s in ss)
-        {
-            var link = FindLink(s);
-            var pid = link?.Pid ?? 0;
-            if (pid <= 0 && procUuidToPid.TryGetValue(RacHelpers.Normalize(s.Get("process")), out var directPid)) pid = directPid;
-            if (pid <= 0) pid = RacHelpers.ParseInt(s.Get("pid"));
-            ib.TryGetValue(RacHelpers.Normalize(s.Get("infobase")), out var db);
-            var b1 = s.Get("blocked-by-dbms");
-            var b2 = s.Get("blocked-by-ls");
-            var sleeping = RacHelpers.IsTrue(s.Get("hibernate"));
-            var operation = RacHelpers.EmptyFallback(s.Get("current-service-call"), RacHelpers.EmptyFallback(s.Get("current-service-name"), link?.Operation ?? ""));
-            var dbRequest = RacHelpers.EmptyFallback(s.Get("current-dbms-request"), link?.DbRequest ?? "");
-
-            result.Sessions.Add(new SessionRow
+            foreach (var candidateCluster in clusterIds)
             {
-                SessionUuid = RacHelpers.Normalize(s.Get("session")),
-                UserName = RacHelpers.EmptyFallback(s.Get("user-name"), "<не указан>"),
-                InfoBase = RacHelpers.EmptyFallback(db, RacHelpers.Normalize(s.Get("infobase"))),
-                AppId = s.Get("app-id"),
-                Host = s.Get("host"),
-                Pid = pid,
-                SessionNumber = RacHelpers.EmptyFallback(s.Get("session-id"), RacHelpers.EmptyFallback(s.Get("session-number"), s.Get("session"))),
-                StartedAt = s.Get("started-at"),
-                LastActiveAt = s.Get("last-active-at"),
-                IsSleeping = sleeping,
-                MemoryCurrentMb = RacHelpers.ParseNum(s.Get("memory-current")) / 1048576d,
-                MemoryLast5MinMb = RacHelpers.ParseNum(s.Get("memory-last-5min")) / 1048576d,
-                CpuTimeCurrent = RacHelpers.ParseNum(s.Get("cpu-time-current")),
-                CpuTimeLast5Min = RacHelpers.ParseNum(s.Get("cpu-time-last-5min")),
-                DurationCurrentMs = RacHelpers.ParseNum(s.Get("duration-current")),
-                DurationDbCurrentMs = RacHelpers.ParseNum(s.Get("duration-current-dbms")),
-                DurationLast5MinMs = RacHelpers.ParseNum(s.Get("duration-last-5min")),
-                DurationDbLast5MinMs = RacHelpers.ParseNum(s.Get("duration-last-5min-dbms")),
-                CallsLast5Min = RacHelpers.ParseInt(s.Get("calls-last-5min")),
-                BytesLast5Min = RacHelpers.ParseNum(s.Get("bytes-last-5min")),
-                DbBytesLast5Min = RacHelpers.ParseNum(s.Get("dbms-bytes-last-5min")),
-                ReadCurrent = RacHelpers.ParseNum(s.Get("read-current")),
-                WriteCurrent = RacHelpers.ParseNum(s.Get("write-current")),
-                ReadLast5Min = RacHelpers.ParseNum(s.Get("read-last-5min")),
-                WriteLast5Min = RacHelpers.ParseNum(s.Get("write-last-5min")),
-                Operation = operation,
-                DbRequest = dbRequest,
-                Blocked = RacHelpers.IsTrue(b1) || RacHelpers.IsTrue(b2) ? $"да (DBMS={b1}, LS={b2})" : "нет"
-            });
+                try
+                {
+                    var candidateSessions = await RunListAsync(new[] { "session", "list" }, candidateCluster);
+                    var count = ParseRecords(candidateSessions).Count;
+                    var clName = clusterNames.TryGetValue(candidateCluster, out var n) && !string.IsNullOrWhiteSpace(n) ? n : candidateCluster;
+                    log?.Invoke($"RAC: кластер {clName} ({candidateCluster}), найдено сеансов: {count}");
+                    var infobaseOut = await TryListAsync(new[] { "infobase", "summary", "list" }, candidateCluster);
+                    var processOut = await TryListAsync(new[] { "process", "list" }, candidateCluster);
+                    var connectionOut = await TryListAsync(new[] { "connection", "list" }, candidateCluster);
+                    selectedClusterSnapshots.Add((candidateCluster, clName, candidateSessions, infobaseOut, processOut, connectionOut));
+                }
+                catch (Exception ex)
+                {
+                    clusterError = ex;
+                    log?.Invoke($"RAC: кластер {candidateCluster} недоступен: {ex.Message}");
+                }
+            }
+        }
+        else
+        {
+            string? bestCluster = null;
+            string bestSessionOutput = "";
+            var bestSessionCount = -1;
+
+            foreach (var candidateCluster in clusterIds)
+            {
+                try
+                {
+                    var candidateSessions = await RunListAsync(new[] { "session", "list" }, candidateCluster);
+                    var count = ParseRecords(candidateSessions).Count;
+                    log?.Invoke($"RAC: кластер {candidateCluster}, найдено сеансов: {count}");
+                    if (count > bestSessionCount)
+                    {
+                        bestSessionCount = count;
+                        bestCluster = candidateCluster;
+                        bestSessionOutput = candidateSessions;
+                    }
+                    if (count > 0 && candidateCluster.Equals(_lastClusterId, StringComparison.OrdinalIgnoreCase)) break;
+                }
+                catch (Exception ex)
+                {
+                    clusterError = ex;
+                    log?.Invoke($"RAC: кластер {candidateCluster} недоступен: {ex.Message}");
+                }
+            }
+
+            if (bestCluster != null)
+            {
+                var clName = clusterNames.TryGetValue(bestCluster, out var n) && !string.IsNullOrWhiteSpace(n) ? n : bestCluster;
+                var infobaseOut = await TryListAsync(new[] { "infobase", "summary", "list" }, bestCluster);
+                var processOut = await TryListAsync(new[] { "process", "list" }, bestCluster);
+                var connectionOut = await TryListAsync(new[] { "connection", "list" }, bestCluster);
+                selectedClusterSnapshots.Add((bestCluster, clName, bestSessionOutput, infobaseOut, processOut, connectionOut));
+            }
+        }
+
+        if (selectedClusterSnapshots.Count == 0)
+            throw new Exception("Не удалось прочитать сеансы ни одного кластера: " + clusterError?.Message);
+
+        var primary = selectedClusterSnapshots[0];
+        _lastClusterId = primary.ClusterId;
+
+        result = new RacSnapshot
+        {
+            RacPath = rac,
+            Endpoint = endpoint,
+            ClusterId = primary.ClusterId,
+            ClusterOutput = clusterOutput,
+            InfoBaseOutput = string.Join("\r\n", selectedClusterSnapshots.Select(x => x.InfobaseOut)),
+            ProcessOutput = string.Join("\r\n", selectedClusterSnapshots.Select(x => x.ProcessOut)),
+            ConnectionOutput = string.Join("\r\n", selectedClusterSnapshots.Select(x => x.ConnectionOut)),
+            SessionOutput = string.Join("\r\n", selectedClusterSnapshots.Select(x => x.SessionOut))
+        };
+        result.ClusterIds.AddRange(clusterIds);
+
+        foreach (var snap in selectedClusterSnapshots)
+        {
+            var ibRecords = ParseRecords(snap.InfobaseOut);
+            var ib = ibRecords.Where(x => RacHelpers.Normalize(x.Get("infobase")).Length > 0)
+                .GroupBy(x => RacHelpers.Normalize(x.Get("infobase")))
+                .ToDictionary(x => x.Key, x => x.First().Get("name"));
+            var pr = ParseRecords(snap.ProcessOut);
+            var cn = ParseRecords(snap.ConnectionOut);
+            var ss = ParseRecords(snap.SessionOut);
+
+            var procUuidToPid = pr.Where(x => RacHelpers.ParseInt(x.Get("pid")) > 0)
+                .GroupBy(x => RacHelpers.Normalize(x.Get("process")))
+                .ToDictionary(x => x.Key, x => RacHelpers.ParseInt(x.First().Get("pid")));
+
+            var connectionLinks = new Dictionary<string, ConnectionLink>();
+            var connectionCandidates = new List<ConnectionLink>();
+            foreach (var c in cn)
+            {
+                var pid = RacHelpers.ParseInt(c.Get("pid"));
+                if (pid <= 0) procUuidToPid.TryGetValue(RacHelpers.Normalize(c.Get("process")), out pid);
+                if (pid <= 0) pid = RacHelpers.ParseInt(c.Get("process-id"));
+                var link = new ConnectionLink(
+                    pid,
+                    RacHelpers.EmptyFallback(c.Get("current-service-call"), c.Get("current-service-name")),
+                    c.Get("current-dbms-request"),
+                    RacHelpers.Normalize(c.Get("host")),
+                    RacHelpers.Normalize(c.Get("infobase")),
+                    RacHelpers.Normalize(c.Get("application")),
+                    RacHelpers.ParseRacDate(c.Get("connected-at")),
+                    RacHelpers.ParseInt(c.Get("conn-id")));
+                connectionCandidates.Add(link);
+                AddLink("uuid", c.Get("connection"), link);
+                AddLink("id", c.Get("conn-id"), link);
+                AddLink("id", c.Get("connection-id"), link);
+                AddLink("session", c.Get("session-number"), link);
+            }
+
+            foreach (var b in ibRecords)
+            {
+                var uuid = RacHelpers.Normalize(b.Get("infobase"));
+                if (uuid.Length == 0) continue;
+                result.InfoBases[uuid] = new InfoBaseRef(uuid, RacHelpers.EmptyFallback(b.Get("name"), uuid), RacHelpers.IsTrue(b.Get("scheduled-jobs-deny")));
+            }
+
+            foreach (var p in pr)
+            {
+                var pid = RacHelpers.ParseInt(p.Get("pid"));
+                if (pid <= 0) continue;
+                result.Processes[pid] = new RacProcess(
+                    pid,
+                    RacHelpers.Normalize(p.Get("process")),
+                    RacHelpers.ParseNum(p.Get("memory-size")) / 1024d,
+                    RacHelpers.ParseNum(p.Get("avg-call-time")) * 1000d,
+                    RacHelpers.ParseNum(p.Get("avg-db-call-time")) * 1000d);
+            }
+
+            foreach (var s in ss)
+            {
+                var link = FindLink(s, connectionLinks, connectionCandidates);
+                var pid = link?.Pid ?? 0;
+                if (pid <= 0 && procUuidToPid.TryGetValue(RacHelpers.Normalize(s.Get("process")), out var directPid)) pid = directPid;
+                if (pid <= 0) pid = RacHelpers.ParseInt(s.Get("pid"));
+                ib.TryGetValue(RacHelpers.Normalize(s.Get("infobase")), out var db);
+                var b1 = s.Get("blocked-by-dbms");
+                var b2 = s.Get("blocked-by-ls");
+                var sleeping = RacHelpers.IsTrue(s.Get("hibernate"));
+                var operation = RacHelpers.EmptyFallback(s.Get("current-service-call"), RacHelpers.EmptyFallback(s.Get("current-service-name"), link?.Operation ?? ""));
+                var dbRequest = RacHelpers.EmptyFallback(s.Get("current-dbms-request"), link?.DbRequest ?? "");
+
+                result.Sessions.Add(new SessionRow
+                {
+                    SessionUuid = RacHelpers.Normalize(s.Get("session")),
+                    ClusterId = snap.ClusterId,
+                    ClusterName = snap.ClusterName,
+                    UserName = RacHelpers.EmptyFallback(s.Get("user-name"), "<не указан>"),
+                    InfoBase = RacHelpers.EmptyFallback(db, RacHelpers.Normalize(s.Get("infobase"))),
+                    AppId = s.Get("app-id"),
+                    Host = s.Get("host"),
+                    Pid = pid,
+                    SessionNumber = RacHelpers.EmptyFallback(s.Get("session-id"), RacHelpers.EmptyFallback(s.Get("session-number"), s.Get("session"))),
+                    StartedAt = s.Get("started-at"),
+                    LastActiveAt = s.Get("last-active-at"),
+                    IsSleeping = sleeping,
+                    MemoryCurrentMb = RacHelpers.ParseNum(s.Get("memory-current")) / 1048576d,
+                    MemoryLast5MinMb = RacHelpers.ParseNum(s.Get("memory-last-5min")) / 1048576d,
+                    CpuTimeCurrent = RacHelpers.ParseNum(s.Get("cpu-time-current")),
+                    CpuTimeLast5Min = RacHelpers.ParseNum(s.Get("cpu-time-last-5min")),
+                    DurationCurrentMs = RacHelpers.ParseNum(s.Get("duration-current")),
+                    DurationDbCurrentMs = RacHelpers.ParseNum(s.Get("duration-current-dbms")),
+                    DurationLast5MinMs = RacHelpers.ParseNum(s.Get("duration-last-5min")),
+                    DurationDbLast5MinMs = RacHelpers.ParseNum(s.Get("duration-last-5min-dbms")),
+                    CallsLast5Min = RacHelpers.ParseInt(s.Get("calls-last-5min")),
+                    BytesLast5Min = RacHelpers.ParseNum(s.Get("bytes-last-5min")),
+                    DbBytesLast5Min = RacHelpers.ParseNum(s.Get("dbms-bytes-last-5min")),
+                    ReadCurrent = RacHelpers.ParseNum(s.Get("read-current")),
+                    WriteCurrent = RacHelpers.ParseNum(s.Get("write-current")),
+                    ReadLast5Min = RacHelpers.ParseNum(s.Get("read-last-5min")),
+                    WriteLast5Min = RacHelpers.ParseNum(s.Get("write-last-5min")),
+                    Operation = operation,
+                    DbRequest = dbRequest,
+                    Blocked = RacHelpers.IsTrue(b1) || RacHelpers.IsTrue(b2) ? $"да (DBMS={b1}, LS={b2})" : "нет"
+                });
+            }
+
+            void AddLink(string kind, string value, ConnectionLink link)
+            {
+                var key = RacHelpers.Normalize(value);
+                if (key.Length > 0) connectionLinks[$"{kind}:{key}"] = link;
+            }
         }
 
         return result;
@@ -391,13 +455,7 @@ public sealed class RacClient
             throw last ?? new Exception("Команда RAC не выполнена");
         }
 
-        void AddLink(string kind, string value, ConnectionLink link)
-        {
-            var key = RacHelpers.Normalize(value);
-            if (key.Length > 0) connectionLinks[$"{kind}:{key}"] = link;
-        }
-
-        ConnectionLink? FindLink(RacRecord s)
+        static ConnectionLink? FindLink(RacRecord s, Dictionary<string, ConnectionLink> connectionLinks, List<ConnectionLink> connectionCandidates)
         {
             var keys = new[]
             {
@@ -449,6 +507,21 @@ public sealed class RacClient
                 }
             }
             catch { }
+        }
+
+        if (options.RestartHungRas && OperatingSystem.IsWindows())
+        {
+            foreach (var hungRas in Process.GetProcessesByName("ras"))
+            {
+                try
+                {
+                    log?.Invoke($"Обнаружен неотвечающий процесс ras.exe (PID {hungRas.Id}), перезапуск…");
+                    hungRas.Kill(true);
+                    hungRas.WaitForExit(3000);
+                }
+                catch { }
+                finally { hungRas.Dispose(); }
+            }
         }
 
         var port = options.Endpoint.Split(':').LastOrDefault() ?? "1545";

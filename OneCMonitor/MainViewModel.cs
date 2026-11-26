@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 using System.Windows.Input;
 using Avalonia.Media;
 using Avalonia.Threading;
+using OneCMonitor.Controls;
 using OneCMonitor.Core;
 
 namespace OneCMonitor;
@@ -20,8 +21,17 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 {
     public ObservableCollection<ProcessRow> Processes { get; } = new();
     public ObservableCollection<SessionRow> Sessions { get; } = new();
+    public ObservableCollection<SessionRow> FilteredSessions { get; } = new();
     public ObservableCollection<AlertRow> Alerts { get; } = new();
+    public ObservableCollection<MetricChartPoint> ChartPoints { get; } = new();
     public MonitorSettings Settings { get; }
+    public WatchdogSettingsEditor Watchdog { get; } = new();
+
+    public Func<string, Task<bool>>? ConfirmActionAsync { get; set; }
+    public Func<string, Task>? CopyToClipboardAsync { get; set; }
+    public Action<int>? NavigateToTab { get; set; }
+    public Action<string, string>? NotifyTrayBalloon { get; set; }
+
     public ICommand RefreshCommand { get; }
     public ICommand ExportCommand { get; }
     public ICommand SaveSettingsCommand { get; }
@@ -29,6 +39,19 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public ICommand CheckUpdatesCommand { get; }
     public ICommand ApplyUpdateCommand { get; }
     public ICommand SetupWatchdogCommand { get; }
+    public ICommand RefreshWatchdogStatusCommand { get; }
+    public ICommand StartWatchdogServiceCommand { get; }
+    public ICommand StopWatchdogServiceCommand { get; }
+    public ICommand RestartWatchdogServiceCommand { get; }
+    public ICommand SaveWatchdogConfigCommand { get; }
+    public ICommand RefreshWatchdogLogCommand { get; }
+    public ICommand SendTestNotificationCommand { get; }
+    public ICommand TerminateSelectedSessionCommand { get; }
+    public ICommand TerminateUserSessionsCommand { get; }
+    public ICommand JumpToProcessCommand { get; }
+    public ICommand CopySessionUuidCommand { get; }
+    public ICommand CopySessionDbRequestCommand { get; }
+    public ICommand ClearSessionFilterCommand { get; }
     public ICommand OpenWebsiteCommand { get; }
     public ICommand OpenEmailCommand { get; }
     public ICommand OpenPhoneCommand { get; }
@@ -45,6 +68,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
     private readonly CancellationTokenSource _stop = new();
     private readonly RacClient _rac = new();
+    private readonly NotificationService _notifications = new();
     private readonly Dictionary<int, CpuSample> _cpu = new();
     private readonly List<HistoryRow> _history = new();
     private readonly List<ServerHistoryRow> _serverHistory = new();
@@ -55,7 +79,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly List<string> _cachedTechLogFiles = new();
     private RacSnapshot? _cachedRac;
     private UpdateCheckResult? _pendingUpdate;
-    private DateTime _lastAutomaticDrain = DateTime.MinValue, _lastUpdateCheckUtc = DateTime.MinValue;
+    private DateTime _lastAutomaticDrain = DateTime.MinValue, _lastUpdateCheckUtc = DateTime.MinValue, _lastWatchdogPollUtc = DateTime.MinValue;
     private DateTime _lastRacPoll = DateTime.MinValue, _lastTechLogScan = DateTime.MinValue, _techLogFileCacheAt = DateTime.MinValue, _lastHistorySample = DateTime.MinValue, _lastPersistentSample = DateTime.MinValue, _lastVolumeRefresh = DateTime.MinValue;
     private string _cachedVolumeSummary = "не определены", _cachedStaticSystem = "";
     private readonly StringBuilder _log = new();
@@ -63,15 +87,18 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     private readonly NetworkPerformanceMonitor _network = new();
     private string _physicalDiskInfo = "Накопители: определение типа SSD/HDD/NVMe…";
     private readonly string _virtualizationInfo = DetectVirtualization();
-    private bool _busy, _updateBusy, _isUpdateAvailable;
-    private bool _isRunning = true;
+    private bool _busy, _updateBusy, _isUpdateAvailable, _hasReleaseNotes;
+    private bool _isRunning = true, _filterActiveOnly, _filterBlockedOnly, _filterDuplicatesOnly;
     private string _status = "Запуск…", _racStatus = "Не проверено", _footer = "Ожидание первого измерения";
     private string _updateStatus = $"Версия {GitHubAutoUpdater.GetCurrentVersion()} • проверка обновлений не выполнялась";
+    private string _availableReleaseNotes = "", _notificationStatus = "", _sessionFilterText = "", _sessionFilterSummary = "";
+    private string _watchdogServiceStatus = "Проверка состояния службы…", _watchdogActionStatus = "", _watchdogLogText = "";
     private string _windowTitle = "1C Server Monitor", _serverHeaderTitle = $"{Environment.MachineName} — сервер 1С", _serverHeaderDetails = "Определение характеристик сервера…";
     private string _serverHardwareText = "Определение оборудования…", _networkLoadText = "Сеть: ожидание первого измерения…";
     private string _adminConfirmationText = "", _adminActionStatus = "Для опасных действий введите контрольную фразу";
     private string _autoDrainStatus = "Автовывод rphost выключен";
     private ProcessRow? _selectedProcess;
+    private SessionRow? _selectedSession;
     private string? _lastRacPath, _lastClusterId;
     private readonly Dictionary<string, InfoBaseRef> _lastInfoBases = new(StringComparer.OrdinalIgnoreCase);
     private IBrush _statusColor = Brushes.Goldenrod;
@@ -82,6 +109,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     {
         Settings = MonitorSettings.Load();
         Settings.BackgroundJobsDisabledInfobases ??= new();
+        Settings.Notifications ??= new NotificationOptions();
         RefreshCommand = new RelayCommand(async () => await RefreshAsync(true));
         ExportCommand = new RelayCommand(ExportHtmlReport);
         SaveSettingsCommand = new RelayCommand(async () => { Settings.Save(); _rac.InvalidateRacCache(); _lastRacPoll = DateTime.MinValue; await RefreshAsync(true); });
@@ -89,6 +117,19 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         CheckUpdatesCommand = new RelayCommand(async () => await CheckForUpdatesAsync(manual: true));
         ApplyUpdateCommand = new RelayCommand(async () => await ApplyAvailableUpdateAsync());
         SetupWatchdogCommand = new RelayCommand(LaunchWatchdogSetup);
+        RefreshWatchdogStatusCommand = new RelayCommand(async () => await RefreshWatchdogStatusAndLogAsync());
+        StartWatchdogServiceCommand = new RelayCommand(async () => await ControlWatchdogServiceAsync("start"));
+        StopWatchdogServiceCommand = new RelayCommand(async () => await ControlWatchdogServiceAsync("stop"));
+        RestartWatchdogServiceCommand = new RelayCommand(async () => await ControlWatchdogServiceAsync("restart"));
+        SaveWatchdogConfigCommand = new RelayCommand(async () => await SaveWatchdogConfigAsync());
+        RefreshWatchdogLogCommand = new RelayCommand(RefreshWatchdogLogOnly);
+        SendTestNotificationCommand = new RelayCommand(async () => await SendTestNotificationAsync());
+        TerminateSelectedSessionCommand = new RelayCommand(async () => await TerminateSelectedSessionDirectAsync(false));
+        TerminateUserSessionsCommand = new RelayCommand(async () => await TerminateSelectedSessionDirectAsync(true));
+        JumpToProcessCommand = new RelayCommand(JumpToSelectedSessionProcess);
+        CopySessionUuidCommand = new RelayCommand(async () => await CopySelectedSessionFieldAsync(s => s.SessionUuid, "UUID сеанса"));
+        CopySessionDbRequestCommand = new RelayCommand(async () => await CopySelectedSessionFieldAsync(s => s.DbRequest, "Запрос СУБД"));
+        ClearSessionFilterCommand = new RelayCommand(() => { SessionFilterText = ""; FilterActiveOnly = false; FilterBlockedOnly = false; FilterDuplicatesOnly = false; });
         OpenWebsiteCommand = new RelayCommand(() => OpenUri("https://csl.by"));
         OpenEmailCommand = new RelayCommand(() => OpenUri("mailto:info@csl.by"));
         OpenPhoneCommand = new RelayCommand(() => OpenUri("tel:+375293371412"));
@@ -103,8 +144,10 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         KillAllRphostCommand = new RelayCommand(async () => await KillAllRphostAsync());
         GracefulTurnOffCommand = new RelayCommand(async () => await GracefulTurnOffSelectedAsync());
         if (string.IsNullOrWhiteSpace(Settings.ReportFolder)) Settings.ReportFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "1CServerMonitor", "Reports");
+        Watchdog.LoadFromDisk();
         UpdateServerHeader(null, default, default);
         _ = LoadPhysicalDiskInfoAsync();
+        _ = RefreshWatchdogStatusAndLogAsync();
         _ = LoopAsync();
         _ = AutoUpdateLoopAsync();
     }
@@ -115,6 +158,18 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     public string RacStatus { get => _racStatus; private set => Set(ref _racStatus, value); }
     public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
     public bool IsUpdateAvailable { get => _isUpdateAvailable; private set => Set(ref _isUpdateAvailable, value); }
+    public string AvailableReleaseNotes { get => _availableReleaseNotes; private set => Set(ref _availableReleaseNotes, value); }
+    public bool HasReleaseNotes { get => _hasReleaseNotes; private set => Set(ref _hasReleaseNotes, value); }
+    public string NotificationStatus { get => _notificationStatus; private set => Set(ref _notificationStatus, value); }
+    public string WatchdogServiceStatus { get => _watchdogServiceStatus; private set => Set(ref _watchdogServiceStatus, value); }
+    public string WatchdogActionStatus { get => _watchdogActionStatus; private set => Set(ref _watchdogActionStatus, value); }
+    public string WatchdogLogText { get => _watchdogLogText; private set => Set(ref _watchdogLogText, value); }
+    public string SessionFilterText { get => _sessionFilterText; set { if (Set(ref _sessionFilterText, value)) ApplySessionFilter(); } }
+    public bool FilterActiveOnly { get => _filterActiveOnly; set { if (Set(ref _filterActiveOnly, value)) ApplySessionFilter(); } }
+    public bool FilterBlockedOnly { get => _filterBlockedOnly; set { if (Set(ref _filterBlockedOnly, value)) ApplySessionFilter(); } }
+    public bool FilterDuplicatesOnly { get => _filterDuplicatesOnly; set { if (Set(ref _filterDuplicatesOnly, value)) ApplySessionFilter(); } }
+    public string SessionFilterSummary { get => _sessionFilterSummary; private set => Set(ref _sessionFilterSummary, value); }
+    public SessionRow? SelectedSession { get => _selectedSession; set => Set(ref _selectedSession, value); }
     public string Footer { get => _footer; private set => Set(ref _footer, value); }
     public string WindowTitle { get => _windowTitle; private set => Set(ref _windowTitle, value); }
     public string ServerHeaderTitle { get => _serverHeaderTitle; private set => Set(ref _serverHeaderTitle, value); }
@@ -271,11 +326,22 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             _lastUpdateCheckUtc = DateTime.UtcNow;
             UpdateStatus = "Проверка обновлений на GitHub…";
             var updater = CreateUpdater();
-            var result = await updater.CheckForUpdateAsync(cancellationToken: _stop.Token);
+            var result = await updater.CheckForUpdateAsync(includePrereleases: Settings.IncludePrereleases, cancellationToken: _stop.Token);
             _pendingUpdate = result.IsUpdateAvailable ? result : null;
             IsUpdateAvailable = result.IsUpdateAvailable;
             UpdateStatus = result.Message;
+            AvailableReleaseNotes = result.IsUpdateAvailable ? (result.ReleaseNotes ?? "").Trim() : "";
+            HasReleaseNotes = result.IsUpdateAvailable && !string.IsNullOrWhiteSpace(AvailableReleaseNotes);
             if (manual || result.IsUpdateAvailable) Log("Обновление: " + result.Message);
+
+            if (result.IsUpdateAvailable)
+            {
+                NotifyTrayBalloon?.Invoke("Доступно обновление 1C Server Monitor", result.Message);
+                if (Settings.Notifications.Enabled && Settings.Notifications.NotifyOnUpdates)
+                {
+                    _ = _notifications.SendAsync(Settings.Notifications, "1C Server Monitor: обновление", result.Message, $"upd:{result.LatestVersion}", cancellationToken: _stop.Token);
+                }
+            }
 
             if (result.IsUpdateAvailable && Settings.AutoUpdateEnabled && Settings.AutoUpdateInstallAutomatically)
             {
@@ -302,10 +368,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             if (target == null || !target.IsUpdateAvailable)
             {
                 UpdateStatus = "Проверка обновлений на GitHub…";
-                target = await updater.CheckForUpdateAsync(cancellationToken: _stop.Token);
+                target = await updater.CheckForUpdateAsync(includePrereleases: Settings.IncludePrereleases, cancellationToken: _stop.Token);
                 _pendingUpdate = target.IsUpdateAvailable ? target : null;
                 IsUpdateAvailable = target.IsUpdateAvailable;
                 UpdateStatus = target.Message;
+                AvailableReleaseNotes = target.IsUpdateAvailable ? (target.ReleaseNotes ?? "").Trim() : "";
+                HasReleaseNotes = target.IsUpdateAvailable && !string.IsNullOrWhiteSpace(AvailableReleaseNotes);
             }
             if (target.IsUpdateAvailable)
                 await ApplyUpdateCoreAsync(updater, target);
@@ -487,10 +555,25 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             {
                 var selectedPid = SelectedProcess?.Pid;
                 Replace(Processes, local); SelectedProcess = selectedPid.HasValue ? Processes.FirstOrDefault(x => x.Pid == selectedPid.Value) : null;
-                if (racDue || manual) Replace(Sessions, sessions.OrderByDescending(s => s.Blocked != "нет").ThenBy(s => s.IsSleeping).ThenBy(s => s.UserName));
+                if (racDue || manual)
+                {
+                    var prevSessionUuid = SelectedSession?.SessionUuid;
+                    Replace(Sessions, sessions.OrderByDescending(s => s.Blocked != "нет").ThenBy(s => s.IsSleeping).ThenBy(s => s.UserName));
+                    ApplySessionFilter();
+                    if (!string.IsNullOrWhiteSpace(prevSessionUuid))
+                        SelectedSession = FilteredSessions.FirstOrDefault(s => s.SessionUuid.Equals(prevSessionUuid, StringComparison.OrdinalIgnoreCase));
+                }
                 ProcessCount = local.Count; SessionCount = sessions.Count;
                 ActiveSessionCount = sessions.Count(x => !x.IsSleeping); SleepingSessionCount = sessions.Count(x => x.IsSleeping);
                 SessionBreakdownText = $"активные {ActiveSessionCount} • спящие {SleepingSessionCount}";
+                ChartPoints.Add(new MetricChartPoint(
+                    now,
+                    local.Sum(x => x.Cpu),
+                    disk.Available ? disk.UsagePercent : 0,
+                    network.Available ? network.UtilizationPercent : 0,
+                    local.Sum(x => x.MemoryMb) / 1024d,
+                    ActiveSessionCount));
+                while (ChartPoints.Count > 240) ChartPoints.RemoveAt(0);
                 var deviations = new List<string>();
                 if (disk.Available && disk.UsagePercent >= (double)Settings.DiskAlert) deviations.Add($"диск {disk.UsagePercent:0}% ≥ порога {Settings.DiskAlert:0}% (ср. очередь {DiskQueueLabel(disk)})");
                 foreach (var p in local.Where(x => x.Risk >= 50)) deviations.Add($"PID {p.Pid}: {p.Diagnosis}");
@@ -505,6 +588,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 Footer = $"Последнее измерение: {now:dd.MM.yyyy HH:mm:ss} • логических CPU: {Environment.ProcessorCount} • история: {_history.Count} точек";
                 UpdateServerHeader(selectedRac, disk, network);
             });
+            if (DateTime.UtcNow - _lastWatchdogPollUtc >= TimeSpan.FromSeconds(30))
+            {
+                _lastWatchdogPollUtc = DateTime.UtcNow;
+                _ = RefreshWatchdogStatusAndLogAsync();
+            }
             AddAlerts(local, sessions, disk, now);
             CheckAutomaticDailyReport(now);
             if (manual) Log($"Ручное обновление: rphost={local.Count}, сеансы={sessions.Count}");
@@ -753,13 +841,241 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             AdminActionStatus = $"Завершается сеанс {s.UserName} ({ok + errors + 1}/{targets.Count})…";
             try
             {
-                await RacClient.TerminateSessionAsync(_lastRacPath, Settings.Endpoint, _lastClusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Max(15, (int)Settings.RacTimeoutSeconds));
+                var clusterId = string.IsNullOrWhiteSpace(s.ClusterId) ? _lastClusterId : s.ClusterId;
+                await RacClient.TerminateSessionAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Max(15, (int)Settings.RacTimeoutSeconds));
                 ok++; Log($"Сеанс завершён: {s.UserName}, UUID {s.SessionUuid}");
             }
             catch (Exception ex) { errors++; Log($"Не завершён сеанс {s.UserName}: {ex.Message}"); }
         }
         await Task.Delay(1200);
         AdminConfirmationText = ""; AdminActionStatus = $"Завершение {description}: успешно {ok}, ошибок {errors}. Подробности во вкладке «Журнал»."; Log(AdminActionStatus); await RefreshAsync(true);
+    }
+
+    private void ApplySessionFilter()
+    {
+        var all = Sessions.ToList();
+        HashSet<string>? dupUuids = null;
+        if (FilterDuplicatesOnly)
+            dupUuids = SessionAnalyzer.GetDuplicateSessions(all).Select(x => x.SessionUuid).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var query = (SessionFilterText ?? "").Trim();
+        var filtered = all.Where(s =>
+        {
+            if (FilterActiveOnly && s.IsSleeping) return false;
+            if (FilterBlockedOnly && s.Blocked == "нет") return false;
+            if (dupUuids != null && !dupUuids.Contains(s.SessionUuid)) return false;
+            if (query.Length > 0)
+            {
+                var hit = (s.UserName?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          (s.InfoBase?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          (s.Host?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          (s.AppId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          (s.Operation?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          (s.TechContext?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                          s.Pid.ToString().Contains(query, StringComparison.OrdinalIgnoreCase);
+                if (!hit) return false;
+            }
+            return true;
+        }).ToList();
+
+        Replace(FilteredSessions, filtered);
+        SessionFilterSummary = filtered.Count == all.Count
+            ? $"Показано сеансов: {filtered.Count}"
+            : $"Показано {filtered.Count} из {all.Count}";
+    }
+
+    private async Task TerminateSelectedSessionDirectAsync(bool allForUser)
+    {
+        var selected = SelectedSession;
+        if (selected == null) return;
+        if (_lastRacPath == null || _lastClusterId == null) { AdminActionStatus = "Нет подключения RAC"; return; }
+
+        var targets = allForUser
+            ? Sessions.Where(s => string.Equals(s.UserName, selected.UserName, StringComparison.OrdinalIgnoreCase)).ToList()
+            : new List<SessionRow> { selected };
+
+        var prompt = allForUser
+            ? $"Завершить ВСЕ сеансы пользователя «{selected.UserName}» ({targets.Count} шт.)?"
+            : $"Завершить сеанс пользователя «{selected.UserName}» (база {selected.InfoBase}, хост {selected.Host}, PID {selected.Pid})?";
+
+        if (ConfirmActionAsync != null && !await ConfirmActionAsync(prompt))
+            return;
+
+        var ok = 0; var errors = 0;
+        foreach (var s in targets.Where(x => !string.IsNullOrWhiteSpace(x.SessionUuid)))
+        {
+            try
+            {
+                var clusterId = string.IsNullOrWhiteSpace(s.ClusterId) ? _lastClusterId : s.ClusterId;
+                await RacClient.TerminateSessionAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Max(15, (int)Settings.RacTimeoutSeconds));
+                ok++; Log($"Сеанс завершён вручную: {s.UserName}, UUID {s.SessionUuid}");
+            }
+            catch (Exception ex) { errors++; Log($"Ошибка завершения сеанса {s.UserName}: {ex.Message}"); }
+        }
+        AdminActionStatus = $"Завершение сеансов: успешно {ok}, ошибок {errors}.";
+        await Task.Delay(800);
+        await RefreshAsync(true);
+    }
+
+    private void JumpToSelectedSessionProcess()
+    {
+        var selected = SelectedSession;
+        if (selected == null || selected.Pid <= 0) return;
+        var match = Processes.FirstOrDefault(p => p.Pid == selected.Pid);
+        if (match != null) SelectedProcess = match;
+        NavigateToTab?.Invoke(0);
+    }
+
+    private async Task CopySelectedSessionFieldAsync(Func<SessionRow, string> selector, string label)
+    {
+        var selected = SelectedSession;
+        if (selected == null || CopyToClipboardAsync == null) return;
+        var val = selector(selected);
+        if (!string.IsNullOrWhiteSpace(val))
+        {
+            await CopyToClipboardAsync(val);
+            Status = $"{label} скопирован в буфер обмена";
+        }
+    }
+
+    private async Task SendTestNotificationAsync()
+    {
+        try
+        {
+            NotificationStatus = "Отправка тестового уведомления…";
+            var errors = await _notifications.SendAsync(
+                Settings.Notifications,
+                "Тестовое уведомление 1C Server Monitor",
+                $"Проверка каналов оповещения с сервера {Environment.MachineName} ({DateTime.Now:dd.MM.yyyy HH:mm:ss}).",
+                bypassCooldown: true,
+                cancellationToken: _stop.Token);
+            NotificationStatus = errors.Count == 0
+                ? (Settings.Notifications.Enabled ? "Тестовое уведомление отправлено успешно." : "Включите переключатель уведомлений перед отправкой.")
+                : "Ошибки отправки: " + string.Join("; ", errors);
+            Log("Уведомления: " + NotificationStatus);
+        }
+        catch (Exception ex)
+        {
+            NotificationStatus = "Ошибка отправки: " + ex.Message;
+        }
+    }
+
+    private async Task RefreshWatchdogStatusAndLogAsync()
+    {
+        await Task.Run(async () =>
+        {
+            string svcStatus = "Не поддерживается (не Windows)";
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    var output = await RacClient.RunAsync("sc.exe", new[] { "query", "1CServerWatchdog" }, 10, _stop.Token);
+                    svcStatus = output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase)
+                        ? "🟢 Работает (RUNNING, LocalSystem)"
+                        : output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase)
+                            ? "🟡 Остановлена (STOPPED)"
+                            : output.Contains("PAUSED", StringComparison.OrdinalIgnoreCase)
+                                ? "🟠 Приостановлена"
+                                : "Состояние: " + output.Split('\n').FirstOrDefault(l => l.Contains("STATE", StringComparison.OrdinalIgnoreCase))?.Trim();
+                }
+                catch (Exception ex)
+                {
+                    svcStatus = ex.Message.Contains("1060") ? "⚪ Не установлена (выполните установку)" : "⚪ Не найдена / ошибка опроса: " + ex.Message;
+                }
+            }
+            var logText = ReadWatchdogLogTail();
+            Dispatcher.UIThread.Post(() =>
+            {
+                WatchdogServiceStatus = svcStatus;
+                WatchdogLogText = logText;
+            });
+        });
+    }
+
+    private void RefreshWatchdogLogOnly()
+    {
+        WatchdogLogText = ReadWatchdogLogTail();
+        WatchdogActionStatus = $"Журнал обновлён ({DateTime.Now:HH:mm:ss})";
+    }
+
+    private static string ReadWatchdogLogTail()
+    {
+        try
+        {
+            var logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "1CServerMonitor", "logs");
+            if (!Directory.Exists(logDir)) return "Каталог логов Watchdog ещё не создан: " + logDir;
+            var latest = Directory.EnumerateFiles(logDir, "watchdog-*.log")
+                .Select(f => new FileInfo(f))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .FirstOrDefault();
+            if (latest == null) return "Файлы логов watchdog-*.log пока отсутствуют.";
+            using var fs = new FileStream(latest.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length > 65536) fs.Seek(-65536, SeekOrigin.End);
+            using var reader = new StreamReader(fs, Encoding.UTF8, true);
+            if (fs.Position > 0) reader.ReadLine();
+            return $"Файл: {latest.FullName}\r\n\r\n" + reader.ReadToEnd();
+        }
+        catch (Exception ex)
+        {
+            return "Не удалось прочитать лог Watchdog (запустите монитор от имени администратора): " + ex.Message;
+        }
+    }
+
+    private async Task ControlWatchdogServiceAsync(string action)
+    {
+        if (!OperatingSystem.IsWindows()) { WatchdogActionStatus = "Доступно только на Windows"; return; }
+        try
+        {
+            WatchdogActionStatus = $"Выполнение '{action}' для службы 1CServerWatchdog…";
+            var cmd = action switch
+            {
+                "start" => "Start-Service -Name '1CServerWatchdog' -ErrorAction Stop",
+                "stop" => "Stop-Service -Name '1CServerWatchdog' -Force -ErrorAction Stop",
+                "restart" => "Restart-Service -Name '1CServerWatchdog' -Force -ErrorAction Stop",
+                _ => throw new ArgumentOutOfRangeException(nameof(action))
+            };
+            try
+            {
+                await RacClient.RunAsync("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", cmd }, 30, _stop.Token);
+            }
+            catch
+            {
+                var p = Process.Start(new ProcessStartInfo("powershell.exe")
+                {
+                    Arguments = $"-NoProfile -NonInteractive -Command \"{cmd}\"",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+                if (p != null) await p.WaitForExitAsync(_stop.Token);
+            }
+            WatchdogActionStatus = $"Команда '{action}' выполнена.";
+            Log($"Служба Watchdog: {WatchdogActionStatus}");
+            await RefreshWatchdogStatusAndLogAsync();
+        }
+        catch (Exception ex)
+        {
+            WatchdogActionStatus = "Ошибка управления службой: " + ex.Message;
+            Log(WatchdogActionStatus);
+        }
+    }
+
+    private async Task SaveWatchdogConfigAsync()
+    {
+        try
+        {
+            Watchdog.SaveToDisk(Settings);
+            WatchdogActionStatus = $"Конфигурация Watchdog сохранена в {WatchdogSettingsEditor.ConfigPath}. Новые правила применятся службой на следующем такте.";
+            Log(WatchdogActionStatus);
+            await RefreshWatchdogStatusAndLogAsync();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            WatchdogActionStatus = "Нет прав записи в ProgramData\\1CServerMonitor (защищено NTFS ACL). Запустите 1C Server Monitor от имени администратора.";
+        }
+        catch (Exception ex)
+        {
+            WatchdogActionStatus = "Ошибка сохранения watchdog.json: " + ex.Message;
+        }
     }
 
     private async Task RestartOneCServicesAsync()
@@ -883,7 +1199,20 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             _lastAlertEmission[item.Key] = now; add.Add(item.Row);
         }
         foreach (var expired in _lastAlertEmission.Where(x => now - x.Value > TimeSpan.FromDays(1)).Select(x => x.Key).ToList()) _lastAlertEmission.Remove(expired);
-        if (add.Count > 0) Dispatcher.UIThread.Post(() => { foreach (var a in add.Take(20).Reverse()) Alerts.Insert(0, a); while (Alerts.Count > 100) Alerts.RemoveAt(Alerts.Count - 1); });
+        if (add.Count > 0)
+        {
+            Dispatcher.UIThread.Post(() => { foreach (var a in add.Take(20).Reverse()) Alerts.Insert(0, a); while (Alerts.Count > 100) Alerts.RemoveAt(Alerts.Count - 1); });
+            var critical = add.FirstOrDefault(a => a.Severity is "КРИТИЧНО" or "БЛОКИРОВКА");
+            if (critical != null)
+            {
+                NotifyTrayBalloon?.Invoke($"1C Server Monitor: {critical.Severity}", $"{critical.Source}: {critical.Message}");
+                if (Settings.Notifications.Enabled && Settings.Notifications.NotifyOnCriticalAlerts)
+                {
+                    var body = string.Join("\n", add.Take(5).Select(a => $"[{a.Severity}] {a.Source}: {a.Message}"));
+                    _ = _notifications.SendAsync(Settings.Notifications, "1C Server Monitor: тревога", body, $"alert:{critical.Source}", cancellationToken: _stop.Token);
+                }
+            }
+        }
     }
 
     private async Task StartRasAsync()
@@ -1004,13 +1333,176 @@ public sealed class MainViewModel : NotifyBase, IDisposable
     }
 }
 
+public sealed class WatchdogSettingsEditor : NotifyBase
+{
+    public static string ConfigPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "1CServerMonitor", "watchdog.json");
+    public IReadOnlyList<string> GroupingModes { get; } = new[]
+    {
+        DuplicateGroupingModes.Full,
+        DuplicateGroupingModes.UserAndBase,
+        DuplicateGroupingModes.UserBaseApp
+    };
+
+    private decimal _checkIntervalSeconds = 30;
+    private bool _dryRun = false, _monitorAllClusters = false, _autoStartRas = true, _restartHungRas = true;
+    private bool _terminateDuplicates = true, _terminateHung = true, _terminateHungOnlyWhenBlockingOthers = false;
+    private bool _ignoreConfigurator = true, _ignoreBackgroundJobs = true;
+    private string _duplicateGroupingMode = DuplicateGroupingModes.Full;
+    private decimal _duplicateKeepNewestCount = 1, _duplicateMinAgeSeconds = 30;
+    private decimal _hungMaxCurrentCallMinutes = 60, _hungMaxDbCallMinutes = 45, _hungMaxBlockedMinutes = 15, _hungMaxSleepingMinutes = 180;
+    private decimal _consecutiveChecksRequired = 1;
+    private string _excludedUsersText = "", _excludedInfoBasesText = "", _targetInfoBasesText = "";
+
+    public decimal CheckIntervalSeconds { get => _checkIntervalSeconds; set => Set(ref _checkIntervalSeconds, value); }
+    public bool DryRun { get => _dryRun; set => Set(ref _dryRun, value); }
+    public bool MonitorAllClusters { get => _monitorAllClusters; set => Set(ref _monitorAllClusters, value); }
+    public bool AutoStartRas { get => _autoStartRas; set => Set(ref _autoStartRas, value); }
+    public bool RestartHungRas { get => _restartHungRas; set => Set(ref _restartHungRas, value); }
+    public bool TerminateDuplicates { get => _terminateDuplicates; set => Set(ref _terminateDuplicates, value); }
+    public string DuplicateGroupingMode { get => _duplicateGroupingMode; set => Set(ref _duplicateGroupingMode, value); }
+    public decimal DuplicateKeepNewestCount { get => _duplicateKeepNewestCount; set => Set(ref _duplicateKeepNewestCount, value); }
+    public decimal DuplicateMinAgeSeconds { get => _duplicateMinAgeSeconds; set => Set(ref _duplicateMinAgeSeconds, value); }
+    public bool TerminateHung { get => _terminateHung; set => Set(ref _terminateHung, value); }
+    public decimal HungMaxCurrentCallMinutes { get => _hungMaxCurrentCallMinutes; set => Set(ref _hungMaxCurrentCallMinutes, value); }
+    public decimal HungMaxDbCallMinutes { get => _hungMaxDbCallMinutes; set => Set(ref _hungMaxDbCallMinutes, value); }
+    public decimal HungMaxBlockedMinutes { get => _hungMaxBlockedMinutes; set => Set(ref _hungMaxBlockedMinutes, value); }
+    public decimal HungMaxSleepingMinutes { get => _hungMaxSleepingMinutes; set => Set(ref _hungMaxSleepingMinutes, value); }
+    public bool TerminateHungOnlyWhenBlockingOthers { get => _terminateHungOnlyWhenBlockingOthers; set => Set(ref _terminateHungOnlyWhenBlockingOthers, value); }
+    public decimal ConsecutiveChecksRequired { get => _consecutiveChecksRequired; set => Set(ref _consecutiveChecksRequired, value); }
+    public bool IgnoreConfigurator { get => _ignoreConfigurator; set => Set(ref _ignoreConfigurator, value); }
+    public bool IgnoreBackgroundJobs { get => _ignoreBackgroundJobs; set => Set(ref _ignoreBackgroundJobs, value); }
+    public string ExcludedUsersText { get => _excludedUsersText; set => Set(ref _excludedUsersText, value); }
+    public string ExcludedInfoBasesText { get => _excludedInfoBasesText; set => Set(ref _excludedInfoBasesText, value); }
+    public string TargetInfoBasesText { get => _targetInfoBasesText; set => Set(ref _targetInfoBasesText, value); }
+
+    public void LoadFromDisk()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath)) return;
+            var dto = JsonSerializer.Deserialize<WatchdogConfigDto>(File.ReadAllText(ConfigPath));
+            if (dto == null) return;
+            CheckIntervalSeconds = Math.Clamp(dto.CheckIntervalSeconds, 5, 3600);
+            DryRun = dto.DryRun;
+            MonitorAllClusters = dto.MonitorAllClusters;
+            AutoStartRas = dto.AutoStartRas;
+            RestartHungRas = dto.RestartHungRas;
+            var p = dto.Policy ?? new SessionPolicyOptions();
+            TerminateDuplicates = p.TerminateDuplicates;
+            DuplicateGroupingMode = string.IsNullOrWhiteSpace(p.DuplicateGroupingMode) ? DuplicateGroupingModes.Full : p.DuplicateGroupingMode;
+            DuplicateKeepNewestCount = Math.Max(1, p.DuplicateKeepNewestCount);
+            DuplicateMinAgeSeconds = Math.Max(0, p.DuplicateMinAgeSeconds);
+            TerminateHung = p.TerminateHung;
+            HungMaxCurrentCallMinutes = Math.Max(0, p.HungMaxCurrentCallMinutes);
+            HungMaxDbCallMinutes = Math.Max(0, p.HungMaxDbCallMinutes);
+            HungMaxBlockedMinutes = Math.Max(0, p.HungMaxBlockedMinutes);
+            HungMaxSleepingMinutes = Math.Max(0, p.HungMaxSleepingMinutes);
+            TerminateHungOnlyWhenBlockingOthers = p.TerminateHungOnlyWhenBlockingOthers;
+            ConsecutiveChecksRequired = Math.Clamp(p.ConsecutiveChecksRequired, 1, 20);
+            IgnoreConfigurator = p.IgnoreConfigurator;
+            IgnoreBackgroundJobs = p.IgnoreBackgroundJobs;
+            ExcludedUsersText = string.Join(", ", p.ExcludedUsers ?? new());
+            ExcludedInfoBasesText = string.Join(", ", p.ExcludedInfoBases ?? new());
+            TargetInfoBasesText = string.Join(", ", p.TargetInfoBases ?? new());
+        }
+        catch { }
+    }
+
+    public void SaveToDisk(MonitorSettings monitorSettings)
+    {
+        WatchdogConfigDto dto = new();
+        try
+        {
+            if (File.Exists(ConfigPath))
+                dto = JsonSerializer.Deserialize<WatchdogConfigDto>(File.ReadAllText(ConfigPath)) ?? new();
+        }
+        catch { }
+
+        dto.RacPath = string.IsNullOrWhiteSpace(monitorSettings.RacPath) ? dto.RacPath : monitorSettings.RacPath;
+        dto.Endpoint = string.IsNullOrWhiteSpace(monitorSettings.Endpoint) ? dto.Endpoint : monitorSettings.Endpoint;
+        dto.AgentEndpoint = string.IsNullOrWhiteSpace(monitorSettings.AgentEndpoint) ? dto.AgentEndpoint : monitorSettings.AgentEndpoint;
+        if (!string.IsNullOrWhiteSpace(monitorSettings.ClusterUser))
+        {
+            dto.ClusterUser = monitorSettings.ClusterUser;
+            dto.EncryptedClusterPassword = SecretProtector.Protect(monitorSettings.ClusterPassword);
+        }
+        dto.CheckIntervalSeconds = (int)CheckIntervalSeconds;
+        dto.DryRun = DryRun;
+        dto.MonitorAllClusters = MonitorAllClusters;
+        dto.AutoStartRas = AutoStartRas;
+        dto.RestartHungRas = RestartHungRas;
+        dto.AutoUpdateEnabled = monitorSettings.AutoUpdateEnabled;
+        dto.IncludePrereleases = monitorSettings.IncludePrereleases;
+        dto.AutoUpdateCheckHours = (int)monitorSettings.AutoUpdateCheckHours;
+        dto.GitHubOwner = monitorSettings.GitHubOwner;
+        dto.GitHubRepository = monitorSettings.GitHubRepository;
+        if (!string.IsNullOrWhiteSpace(monitorSettings.EncryptedGitHubToken))
+            dto.EncryptedGitHubToken = monitorSettings.EncryptedGitHubToken;
+        dto.Notifications = monitorSettings.Notifications;
+        dto.Policy = new SessionPolicyOptions
+        {
+            TerminateDuplicates = TerminateDuplicates,
+            DuplicateGroupingMode = DuplicateGroupingMode,
+            DuplicateKeepNewestCount = (int)DuplicateKeepNewestCount,
+            DuplicateMinAgeSeconds = (int)DuplicateMinAgeSeconds,
+            TerminateHung = TerminateHung,
+            HungMaxCurrentCallMinutes = (int)HungMaxCurrentCallMinutes,
+            HungMaxDbCallMinutes = (int)HungMaxDbCallMinutes,
+            HungMaxBlockedMinutes = (int)HungMaxBlockedMinutes,
+            HungMaxSleepingMinutes = (int)HungMaxSleepingMinutes,
+            TerminateHungOnlyWhenBlockingOthers = TerminateHungOnlyWhenBlockingOthers,
+            ConsecutiveChecksRequired = (int)ConsecutiveChecksRequired,
+            IgnoreConfigurator = IgnoreConfigurator,
+            IgnoreBackgroundJobs = IgnoreBackgroundJobs,
+            ExcludedUsers = SplitCsv(ExcludedUsersText),
+            ExcludedInfoBases = SplitCsv(ExcludedInfoBasesText),
+            TargetInfoBases = SplitCsv(TargetInfoBasesText)
+        };
+
+        Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static List<string> SplitCsv(string text) =>
+        (text ?? "").Split(new[] { ',', ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private sealed class WatchdogConfigDto
+    {
+        public string RacPath { get; set; } = "";
+        public string Endpoint { get; set; } = "127.0.0.1:1545";
+        public string AgentEndpoint { get; set; } = "127.0.0.1:1540";
+        public string ClusterUser { get; set; } = "";
+        public string EncryptedClusterPassword { get; set; } = "";
+        public int RacTimeoutSeconds { get; set; } = 60;
+        public bool AutoStartRas { get; set; } = true;
+        public bool RestartHungRas { get; set; } = true;
+        public bool MonitorAllClusters { get; set; } = false;
+        public List<string> TargetClusters { get; set; } = new();
+        public int CheckIntervalSeconds { get; set; } = 30;
+        public bool DryRun { get; set; } = false;
+        public SessionPolicyOptions Policy { get; set; } = new();
+        public NotificationOptions Notifications { get; set; } = new();
+        public string LogDirectory { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "1CServerMonitor", "logs");
+        public int LogRetentionDays { get; set; } = 30;
+        public bool AutoUpdateEnabled { get; set; } = true;
+        public bool IncludePrereleases { get; set; } = false;
+        public int AutoUpdateCheckHours { get; set; } = 6;
+        public string GitHubOwner { get; set; } = "zigorminsk-debug";
+        public string GitHubRepository { get; set; } = "1C-Monitor";
+        public string EncryptedGitHubToken { get; set; } = "";
+    }
+}
+
 public sealed class MonitorSettings : NotifyBase
 {
     private string _racPath = "", _endpoint = "127.0.0.1:1545", _agentEndpoint = "127.0.0.1:1540", _clusterUser = "", _clusterPassword = "", _techLogPath = "", _reportFolder = "", _lastAutoReportDate = "";
     private string _gitHubOwner = "zigorminsk-debug", _gitHubRepository = "1C-Monitor", _encryptedGitHubToken = "";
-    private bool _autoDailyReport = true, _autoDrainEnabled = false, _autoUpdateEnabled = true, _autoUpdateInstallAutomatically = true;
+    private bool _autoDailyReport = true, _autoDrainEnabled = false, _autoUpdateEnabled = true, _autoUpdateInstallAutomatically = true, _includePrereleases = false, _minimizeToTrayOnClose = true, _monitorAllClusters = false;
     private decimal _intervalSeconds = 5, _racPollSeconds = 15, _techLogPollSeconds = 60, _historyWriteSeconds = 60, _alertRepeatSeconds = 300, _racTimeoutSeconds = 60, _cpuAlert = 80, _memoryAlertMb = 4096, _callAlertMs = 5000, _diskAlert = 90;
     private decimal _autoDrainMemoryMb = 6144, _autoDrainMinutes = 10, _autoDrainMinProcesses = 2, _autoDrainCooldownMinutes = 30, _autoUpdateCheckHours = 6;
+    public NotificationOptions Notifications { get; set; } = new();
     public string RacPath { get => _racPath; set => Set(ref _racPath, value); }
     public string Endpoint { get => _endpoint; set => Set(ref _endpoint, value); }
     public string AgentEndpoint { get => _agentEndpoint; set => Set(ref _agentEndpoint, value); }
@@ -1020,6 +1512,8 @@ public sealed class MonitorSettings : NotifyBase
     public string ReportFolder { get => _reportFolder; set => Set(ref _reportFolder, value); }
     public string LastAutoReportDate { get => _lastAutoReportDate; set => Set(ref _lastAutoReportDate, value); }
     public bool AutoDailyReport { get => _autoDailyReport; set => Set(ref _autoDailyReport, value); }
+    public bool MinimizeToTrayOnClose { get => _minimizeToTrayOnClose; set => Set(ref _minimizeToTrayOnClose, value); }
+    public bool MonitorAllClusters { get => _monitorAllClusters; set => Set(ref _monitorAllClusters, value); }
     public List<string> BackgroundJobsDisabledInfobases { get; set; } = new();
     public bool AutoDrainEnabled { get => _autoDrainEnabled; set => Set(ref _autoDrainEnabled, value); }
     public decimal AutoDrainMemoryMb { get => _autoDrainMemoryMb; set => Set(ref _autoDrainMemoryMb, value); }
@@ -1038,6 +1532,7 @@ public sealed class MonitorSettings : NotifyBase
     public decimal DiskAlert { get => _diskAlert; set => Set(ref _diskAlert, value); }
     public bool AutoUpdateEnabled { get => _autoUpdateEnabled; set => Set(ref _autoUpdateEnabled, value); }
     public bool AutoUpdateInstallAutomatically { get => _autoUpdateInstallAutomatically; set => Set(ref _autoUpdateInstallAutomatically, value); }
+    public bool IncludePrereleases { get => _includePrereleases; set => Set(ref _includePrereleases, value); }
     public decimal AutoUpdateCheckHours { get => _autoUpdateCheckHours; set => Set(ref _autoUpdateCheckHours, value); }
     public string GitHubOwner { get => _gitHubOwner; set => Set(ref _gitHubOwner, value); }
     public string GitHubRepository { get => _gitHubRepository; set => Set(ref _gitHubRepository, value); }
@@ -1055,10 +1550,12 @@ public sealed class MonitorSettings : NotifyBase
         AgentEndpoint = AgentEndpoint,
         ClusterUser = ClusterUser,
         ClusterPassword = ClusterPassword,
-        TimeoutSeconds = Math.Max(15, (int)RacTimeoutSeconds)
+        TimeoutSeconds = Math.Max(15, (int)RacTimeoutSeconds),
+        MonitorAllClusters = MonitorAllClusters,
+        RestartHungRas = true
     };
     private static string FileName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "1CServerMonitor", "settings.json");
-    public static MonitorSettings Load() { try { if (File.Exists(FileName)) return JsonSerializer.Deserialize<MonitorSettings>(File.ReadAllText(FileName)) ?? new(); } catch { } return new(); }
+    public static MonitorSettings Load() { try { if (File.Exists(FileName)) { var s = JsonSerializer.Deserialize<MonitorSettings>(File.ReadAllText(FileName)) ?? new(); s.Notifications ??= new(); return s; } } catch { } return new(); }
     public void Save() { Directory.CreateDirectory(Path.GetDirectoryName(FileName)!); var pwd = ClusterPassword; ClusterPassword = ""; try { File.WriteAllText(FileName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); } finally { ClusterPassword = pwd; } }
 }
 

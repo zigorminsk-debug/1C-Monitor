@@ -27,6 +27,8 @@ public sealed class ProcessRow
 public sealed class SessionRow
 {
     public string SessionUuid { get; set; } = "";
+    public string ClusterId { get; set; } = "";
+    public string ClusterName { get; set; } = "";
     public string UserName { get; set; } = "";
     public string InfoBase { get; set; } = "";
     public string AppId { get; set; } = "";
@@ -114,6 +116,9 @@ public sealed class RacConnectionOptions
     public string ClusterUser { get; set; } = "";
     public string ClusterPassword { get; set; } = "";
     public int TimeoutSeconds { get; set; } = 60;
+    public bool MonitorAllClusters { get; set; } = false;
+    public List<string> TargetClusters { get; set; } = new();
+    public bool RestartHungRas { get; set; } = true;
 }
 
 public static class RacHelpers

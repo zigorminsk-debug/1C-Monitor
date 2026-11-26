@@ -31,6 +31,9 @@ jobs:
       - name: Build Release
         run: dotnet build OneCMonitor.sln --configuration Release --no-restore
 
+      - name: Run Unit Tests
+        run: dotnet test OneCMonitor.sln --configuration Release --no-build --verbosity normal
+
       - name: Publish 1C Watchdog (${{ matrix.rid }})
         run: >
           dotnet publish OneCWatchdog/OneCWatchdog.csproj

@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneCMonitor.Core", "OneCMon
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneCWatchdog", "OneCWatchdog\OneCWatchdog.csproj", "{C4F3A7E9-5B2C-4D1A-9E83-3F7A1C5D2E03}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneCMonitor.Tests", "OneCMonitor.Tests\OneCMonitor.Tests.csproj", "{D6E5B8F0-7C3D-4F2B-A194-4E8B2D6F3A04}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,6 +28,10 @@ Global
 		{C4F3A7E9-5B2C-4D1A-9E83-3F7A1C5D2E03}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C4F3A7E9-5B2C-4D1A-9E83-3F7A1C5D2E03}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C4F3A7E9-5B2C-4D1A-9E83-3F7A1C5D2E03}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D6E5B8F0-7C3D-4F2B-A194-4E8B2D6F3A04}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D6E5B8F0-7C3D-4F2B-A194-4E8B2D6F3A04}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D6E5B8F0-7C3D-4F2B-A194-4E8B2D6F3A04}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D6E5B8F0-7C3D-4F2B-A194-4E8B2D6F3A04}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -2,6 +2,23 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версионирование следует [SemVer](https://semver.org/lang/ru/).
 
+## [1.5.0] — 2026-11-26
+
+### Добавлено
+- **Вкладка «Служба Watchdog» в GUI**: статус службы `1CServerWatchdog` (`LocalSystem`), запуск/остановка/перезапуск, полный редактор политик `watchdog.json` (группировка дубликатов, grace checks, whitelist/blacklist баз, DryRun, все кластеры) и просмотр последних логов `%ProgramData%\1CServerMonitor\logs` прямо в интерфейсе.
+- **Графики в реальном времени** (`MetricsChartControl`): отображение последних 240 замеров CPU `rphost`, диска, сети и активных сеансов во вкладке «Обзор».
+- **Поиск, фильтры и контекстное меню сеансов**: фильтрация по тексту, активным/блокированным/дубликатам; завершение выбранного сеанса или всех сеансов пользователя с модальным подтверждением, переход к процессу `rphost` и копирование UUID / запроса СУБД.
+- **Системный трей (`TrayIcon`)**: сворачивание при закрытии окна для сохранения работы суточного отчёта (`23:55`), быстрое меню управления в трее.
+- **Оповещения (Telegram / Webhook / Email SMTP)**: отправка уведомлений о критических тревогах, срабатываниях Watchdog и выходе новых версий (секреты шифруются Windows DPAPI).
+- **Улучшенный `SessionAnalyzer` и `RacClient`**:
+  - Режимы группировки дубликатов (`Full`, `UserAndBase`, `UserBaseApp`), grace period (`ConsecutiveChecksRequired`), условие `TerminateHungOnlyWhenBlockingOthers` и белый список `TargetInfoBases`.
+  - Мониторинг нескольких кластеров (`MonitorAllClusters` / `TargetClusters`) и автоматический перезапуск зависшего `ras.exe` с экспоненциальным backoff.
+  - Отложенный автозапуск службы Watchdog (`start= delayed-auto`, `depend= Tcpip`).
+- **Откат и pre-release в `GitHubAutoUpdater`**: проверка работоспособности после замены exe/перезапуска службы с автоматическим восстановлением резервной копии при сбое, канал pre-release и отображение Release Notes в GUI.
+- **Набор модульных тестов `OneCMonitor.Tests`** (xUnit) с запуском `dotnet test` в CI.
+
+---
+
 ## [1.4.0] — 2026-11-26
 
 ### Добавлено
