@@ -131,12 +131,12 @@ public static class WatchdogSetup
         var binPath = $"\"{targetExe}\" --service";
         var exists = await ServiceExistsAsync(WatchdogConfig.ServiceName);
         if (exists)
-            await RunScStrictAsync("config", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+            await RunScStrictAsync("config", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
         else
-            await RunScStrictAsync("create", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+            await RunScStrictAsync("create", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
 
         await TryScAsync("description", WatchdogConfig.ServiceName, "Автоматическое отслеживание и завершение дублирующихся и зависших сеансов пользователей 1С:Предприятие 8.");
-        await TryScAsync("failure", WatchdogConfig.ServiceName, "reset= 86400", "actions= restart/5000/restart/15000/restart/60000");
+        await TryScAsync("failure", WatchdogConfig.ServiceName, "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/60000");
         await TryScAsync("failureflag", WatchdogConfig.ServiceName, "1");
 
         Emit("7. Запуск службы 1CServerWatchdog…");
@@ -270,15 +270,15 @@ public static class WatchdogSetup
             var exists = await ServiceExistsAsync(WatchdogConfig.ServiceName);
             if (exists)
             {
-                await RunScStrictAsync("config", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("config", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
             }
             else
             {
-                await RunScStrictAsync("create", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("create", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
             }
 
             await TryScAsync("description", WatchdogConfig.ServiceName, "Автоматическое отслеживание и завершение дублирующихся и зависших сеансов пользователей 1С:Предприятие 8.");
-            await TryScAsync("failure", WatchdogConfig.ServiceName, "reset= 86400", "actions= restart/5000/restart/15000/restart/60000");
+            await TryScAsync("failure", WatchdogConfig.ServiceName, "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/60000");
             await TryScAsync("failureflag", WatchdogConfig.ServiceName, "1");
 
             logger.Info("7. Проверка подключения к кластеру 1С (RAC/RAS)…");
