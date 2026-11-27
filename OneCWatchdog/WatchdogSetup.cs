@@ -45,6 +45,158 @@ public static class WatchdogSetup
         return false;
     }
 
+    public static void RestartElevatedForGui(string extraArgs = "--gui")
+    {
+        if (!OperatingSystem.IsWindows() || IsAdministrator()) return;
+        var exePath = Environment.ProcessPath ?? throw new Exception("Не удалось определить путь к 1C-Watchdog.exe");
+        var psi = new ProcessStartInfo(exePath)
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+            Arguments = extraArgs
+        };
+        Process.Start(psi);
+        Environment.Exit(0);
+    }
+
+    public static async Task<(bool Exists, bool IsRunning, string StatusText, string RawOutput)> QueryServiceStateAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+            return (false, false, "Служба Windows доступна только на ОС Windows", "");
+
+        var (code, output) = await RunProcessCaptureAsync("sc.exe", new[] { "query", WatchdogConfig.ServiceName });
+        if (code != 0)
+            return (false, false, "Не установлена (служба 1CServerWatchdog не зарегистрирована)", output);
+
+        if (output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+            return (true, true, "Работает (RUNNING · LocalSystem · delayed-auto)", output);
+        if (output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+            return (true, false, "Остановлена (STOPPED · LocalSystem)", output);
+        if (output.Contains("START_PENDING", StringComparison.OrdinalIgnoreCase))
+            return (true, false, "Запускается (START_PENDING)…", output);
+        if (output.Contains("STOP_PENDING", StringComparison.OrdinalIgnoreCase))
+            return (true, false, "Останавливается (STOP_PENDING)…", output);
+        if (output.Contains("PAUSED", StringComparison.OrdinalIgnoreCase))
+            return (true, false, "Приостановлена (PAUSED)", output);
+
+        return (true, false, "Установлена (статус неизвестен)", output);
+    }
+
+    public static async Task InstallOrReconfigureFromGuiAsync(WatchdogConfig config, bool inPlace, Action<string> log)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Установка службы Windows поддерживается только в ОС Windows.");
+        if (!IsAdministrator())
+            throw new UnauthorizedAccessException("Требуются права администратора (UAC). Нажмите «Перезапустить от администратора».");
+
+        Directory.CreateDirectory(WatchdogConfig.BaseDataDirectory);
+        Directory.CreateDirectory(WatchdogConfig.DefaultLogDirectory);
+        Directory.CreateDirectory(WatchdogConfig.DefaultUpdateStagingDirectory);
+
+        var fileLogger = new WatchdogLogger(WatchdogConfig.DefaultLogDirectory, filePrefix: "setup", writeToConsole: false);
+        void Emit(string msg) { fileLogger.Info(msg); log(msg); }
+
+        Emit("=== Установка / обновление службы 1C Watchdog ===");
+        Emit($"Учётная запись: {GetIdentityName()}");
+
+        var currentExe = Environment.ProcessPath ?? throw new Exception("Не определён путь к 1C-Watchdog.exe");
+        var targetExe = inPlace ? currentExe : Path.Combine(DefaultInstallDir, "1C-Watchdog.exe");
+
+        Emit("1. Настройка защищённых каталогов и NTFS ACL (SYSTEM + Administrators)…");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetExe)!);
+        ApplyPrivilegedDirectoryAcl(WatchdogConfig.BaseDataDirectory, fileLogger);
+        ApplyPrivilegedDirectoryAcl(Path.GetDirectoryName(targetExe)!, fileLogger);
+
+        Emit("2. Остановка текущей службы (если запущена)…");
+        await TryScAsync("stop", WatchdogConfig.ServiceName);
+        await WaitForServiceStoppedAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+
+        if (!string.Equals(currentExe, targetExe, StringComparison.OrdinalIgnoreCase))
+        {
+            Emit($"3. Копирование 1C-Watchdog.exe в {targetExe}…");
+            File.Copy(currentExe, targetExe, true);
+        }
+        else
+        {
+            Emit($"3. Используется текущий исполняемый файл: {targetExe}");
+        }
+
+        Emit("4. Сохранение конфигурации (секреты шифруются DPAPI LocalMachine)…");
+        config.Save();
+
+        Emit("5. Регистрация источника журнала событий Windows (EventLog)…");
+        EnsureEventLogSource(fileLogger);
+
+        Emit("6. Регистрация службы Windows (LocalSystem, delayed-auto, recovery)…");
+        var binPath = $"\"{targetExe}\" --service";
+        var exists = await ServiceExistsAsync(WatchdogConfig.ServiceName);
+        if (exists)
+            await RunScStrictAsync("config", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
+        else
+            await RunScStrictAsync("create", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
+
+        await TryScAsync("description", WatchdogConfig.ServiceName, "Автоматическое отслеживание и завершение дублирующихся и зависших сеансов пользователей 1С:Предприятие 8.");
+        await TryScAsync("failure", WatchdogConfig.ServiceName, "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/60000");
+        await TryScAsync("failureflag", WatchdogConfig.ServiceName, "1");
+
+        Emit("7. Запуск службы 1CServerWatchdog…");
+        await RunScStrictAsync("start", WatchdogConfig.ServiceName);
+        await WaitForServiceRunningAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+
+        fileLogger.Info($"Служба '{WatchdogConfig.ServiceName}' настроена через GUI и запущена от LocalSystem.", eventLog: true);
+        Emit("Готово! Служба 1CServerWatchdog успешно установлена и работает.");
+    }
+
+    public static async Task ControlServiceAsync(string action, Action<string> log)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Доступно только на Windows.");
+        if (!IsAdministrator())
+            throw new UnauthorizedAccessException("Требуются права администратора (UAC).");
+
+        switch (action.ToLowerInvariant())
+        {
+            case "start":
+                log("Запуск службы 1CServerWatchdog…");
+                await RunScStrictAsync("start", WatchdogConfig.ServiceName);
+                await WaitForServiceRunningAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+                log("Служба запущена.");
+                break;
+            case "stop":
+                log("Остановка службы 1CServerWatchdog…");
+                await RunScStrictAsync("stop", WatchdogConfig.ServiceName);
+                await WaitForServiceStoppedAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+                log("Служба остановлена.");
+                break;
+            case "restart":
+                log("Перезапуск службы 1CServerWatchdog…");
+                await TryScAsync("stop", WatchdogConfig.ServiceName);
+                await WaitForServiceStoppedAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+                await RunScStrictAsync("start", WatchdogConfig.ServiceName);
+                await WaitForServiceRunningAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(20));
+                log("Служба перезапущена.");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(action));
+        }
+    }
+
+    public static async Task UninstallFromGuiAsync(Action<string> log)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Доступно только на Windows.");
+        if (!IsAdministrator())
+            throw new UnauthorizedAccessException("Требуются права администратора (UAC).");
+
+        var fileLogger = new WatchdogLogger(WatchdogConfig.DefaultLogDirectory, filePrefix: "setup", writeToConsole: false);
+        log("Остановка и удаление службы 1CServerWatchdog…");
+        await TryScAsync("stop", WatchdogConfig.ServiceName);
+        await WaitForServiceStoppedAsync(WatchdogConfig.ServiceName, TimeSpan.FromSeconds(15));
+        await RunScStrictAsync("delete", WatchdogConfig.ServiceName);
+        fileLogger.Info("Служба 1CServerWatchdog удалена через GUI.", eventLog: true);
+        log("Служба 1CServerWatchdog удалена.");
+    }
+
     public static async Task<int> RunSetupAsync(string[] args)
     {
         if (!OperatingSystem.IsWindows())
@@ -118,15 +270,15 @@ public static class WatchdogSetup
             var exists = await ServiceExistsAsync(WatchdogConfig.ServiceName);
             if (exists)
             {
-                await RunScStrictAsync("config", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("config", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
             }
             else
             {
-                await RunScStrictAsync("create", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("create", WatchdogConfig.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "depend=", "Tcpip", "obj=", "LocalSystem", "DisplayName=", WatchdogConfig.ServiceDisplayName);
             }
 
             await TryScAsync("description", WatchdogConfig.ServiceName, "Автоматическое отслеживание и завершение дублирующихся и зависших сеансов пользователей 1С:Предприятие 8.");
-            await TryScAsync("failure", WatchdogConfig.ServiceName, "reset= 86400", "actions= restart/5000/restart/15000/restart/60000");
+            await TryScAsync("failure", WatchdogConfig.ServiceName, "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/60000");
             await TryScAsync("failureflag", WatchdogConfig.ServiceName, "1");
 
             logger.Info("7. Проверка подключения к кластеру 1С (RAC/RAS)…");

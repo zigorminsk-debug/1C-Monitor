@@ -167,9 +167,9 @@
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автономная служба контроля сеансов (1C Watchdog)" FontSize="17" FontWeight="SemiBold"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Установить / настроить службу 1C Watchdog (LocalSystem)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,10" Background="#1D4ED8"/>
+              <Button Content="Открыть панель настройки 1C Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,10" Background="#1D4ED8"/>
             </WrapPanel>
-            <TextBlock Text="Запускает мастер 1C-Watchdog.exe --setup с запросом прав администратора (UAC): регистрирует системную службу Windows от имени LocalSystem с автозапуском и автовосстановлением, настраивает защищённые права NTFS, журнал событий Windows и ротацию логов в %ProgramData%\1CServerMonitor\logs, а также автоматически завершает дублирующиеся и зависшие сеансы 1С." Classes="muted" TextWrapping="Wrap"/>
+            <TextBlock Text="Запускает графическую панель 1C-Watchdog.exe (--gui) с запросом прав администратора (UAC): установка/удаление службы Windows от имени LocalSystem с автозапуском и автовосстановлением, защищённые права NTFS, настройка RAC/RAS, правила контроля, уведомления, Dry-Run тест и журнал работы." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
         </StackPanel></ScrollViewer>
       </TabItem>
@@ -180,7 +180,7 @@
             <TextBlock Text="Состояние системной службы 1C Watchdog (LocalSystem)" FontSize="17" FontWeight="SemiBold"/>
             <TextBlock Text="{Binding WatchdogServiceStatus}" FontSize="16" FontWeight="SemiBold" Foreground="#60A5FA"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Установить / настроить (--setup, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,8" Background="#1D4ED8"/>
+              <Button Content="Открыть настройки Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,8" Background="#1D4ED8"/>
               <Button Content="Запустить службу" Command="{Binding StartWatchdogServiceCommand}" Margin="0,0,10,8" Background="#065F46"/>
               <Button Content="Остановить службу" Command="{Binding StopWatchdogServiceCommand}" Margin="0,0,10,8" Background="#92400E"/>
               <Button Content="Перезапустить" Command="{Binding RestartWatchdogServiceCommand}" Margin="0,0,10,8"/>

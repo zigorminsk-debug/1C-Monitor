@@ -425,6 +425,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var watchdogExe = Path.Combine(dir, "1C-Watchdog.exe");
             if (!File.Exists(watchdogExe))
             {
+                var installedExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "1CServerMonitor", "Watchdog", "1C-Watchdog.exe");
+                if (File.Exists(installedExe))
+                    watchdogExe = installedExe;
+            }
+            if (!File.Exists(watchdogExe))
+            {
                 AdminActionStatus = $"Файл 1C-Watchdog.exe не найден рядом с приложением ({dir})";
                 Log(AdminActionStatus);
                 return;
@@ -432,11 +438,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
             Process.Start(new ProcessStartInfo(watchdogExe)
             {
-                Arguments = "--setup",
+                Arguments = "--gui",
                 UseShellExecute = true,
                 Verb = "runas"
             });
-            AdminActionStatus = "Запущен мастер установки службы 1C Watchdog";
+            AdminActionStatus = "Запущена GUI-панель настройки службы 1C Watchdog";
             Log(AdminActionStatus);
         }
         catch (Exception ex)
@@ -969,18 +975,29 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             {
                 try
                 {
-                    var output = await RacClient.RunAsync("sc.exe", new[] { "query", "1CServerWatchdog" }, 10, _stop.Token);
-                    svcStatus = output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase)
-                        ? "🟢 Работает (RUNNING, LocalSystem)"
-                        : output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase)
-                            ? "🟡 Остановлена (STOPPED)"
-                            : output.Contains("PAUSED", StringComparison.OrdinalIgnoreCase)
-                                ? "🟠 Приостановлена"
-                                : "Состояние: " + output.Split('\n').FirstOrDefault(l => l.Contains("STATE", StringComparison.OrdinalIgnoreCase))?.Trim();
+                    var (code, output) = await QueryWatchdogServiceRawAsync();
+                    if (code != 0)
+                    {
+                        svcStatus = code == 1060 || output.Contains("1060")
+                            ? "⚪ Не установлена (выполните установку)"
+                            : $"⚪ Ошибка опроса (код {code}): {output.Trim()}";
+                    }
+                    else if (output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+                        svcStatus = "🟢 Работает (RUNNING, LocalSystem)";
+                    else if (output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+                        svcStatus = "🟡 Остановлена (STOPPED)";
+                    else if (output.Contains("START_PENDING", StringComparison.OrdinalIgnoreCase))
+                        svcStatus = "🟡 Запускается (START_PENDING)…";
+                    else if (output.Contains("STOP_PENDING", StringComparison.OrdinalIgnoreCase))
+                        svcStatus = "🟡 Останавливается (STOP_PENDING)…";
+                    else if (output.Contains("PAUSED", StringComparison.OrdinalIgnoreCase))
+                        svcStatus = "🟠 Приостановлена";
+                    else
+                        svcStatus = "Состояние: " + output.Split('\n').FirstOrDefault(l => l.Contains("STATE", StringComparison.OrdinalIgnoreCase))?.Trim();
                 }
                 catch (Exception ex)
                 {
-                    svcStatus = ex.Message.Contains("1060") ? "⚪ Не установлена (выполните установку)" : "⚪ Не найдена / ошибка опроса: " + ex.Message;
+                    svcStatus = "⚪ Ошибка опроса службы: " + ex.Message;
                 }
             }
             var logText = ReadWatchdogLogTail();
@@ -990,6 +1007,24 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 WatchdogLogText = logText;
             });
         });
+    }
+
+    private async Task<(int ExitCode, string Output)> QueryWatchdogServiceRawAsync()
+    {
+        var psi = new ProcessStartInfo("sc.exe")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        psi.ArgumentList.Add("query");
+        psi.ArgumentList.Add("1CServerWatchdog");
+        using var proc = Process.Start(psi) ?? throw new Exception("Не удалось запустить sc.exe");
+        var stdout = proc.StandardOutput.ReadToEndAsync(_stop.Token);
+        var stderr = proc.StandardError.ReadToEndAsync(_stop.Token);
+        await proc.WaitForExitAsync(_stop.Token);
+        return (proc.ExitCode, (await stdout) + "\n" + (await stderr));
     }
 
     private void RefreshWatchdogLogOnly()
@@ -1026,6 +1061,14 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         if (!OperatingSystem.IsWindows()) { WatchdogActionStatus = "Доступно только на Windows"; return; }
         try
         {
+            var (qCode, _) = await QueryWatchdogServiceRawAsync();
+            if (qCode == 1060)
+            {
+                WatchdogActionStatus = "Служба 1CServerWatchdog не установлена в Windows. Нажмите «Открыть настройки Watchdog (GUI, UAC)» и выполните установку службы.";
+                await RefreshWatchdogStatusAndLogAsync();
+                return;
+            }
+
             WatchdogActionStatus = $"Выполнение '{action}' для службы 1CServerWatchdog…";
             var cmd = action switch
             {
@@ -1034,20 +1077,32 @@ public sealed class MainViewModel : NotifyBase, IDisposable
                 "restart" => "Restart-Service -Name '1CServerWatchdog' -Force -ErrorAction Stop",
                 _ => throw new ArgumentOutOfRangeException(nameof(action))
             };
+
+            var isAdmin = false;
             try
+            {
+                using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                isAdmin = new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+            }
+            catch { }
+
+            if (isAdmin)
             {
                 await RacClient.RunAsync("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", cmd }, 30, _stop.Token);
             }
-            catch
+            else
             {
                 var p = Process.Start(new ProcessStartInfo("powershell.exe")
                 {
                     Arguments = $"-NoProfile -NonInteractive -Command \"{cmd}\"",
                     UseShellExecute = true,
                     Verb = "runas"
-                });
-                if (p != null) await p.WaitForExitAsync(_stop.Token);
+                }) ?? throw new Exception("Не удалось запустить PowerShell с правами администратора");
+                await p.WaitForExitAsync(_stop.Token);
+                if (p.ExitCode != 0)
+                    throw new Exception($"Команда '{action}' завершилась с кодом {p.ExitCode}");
             }
+
             WatchdogActionStatus = $"Команда '{action}' выполнена.";
             Log($"Служба Watchdog: {WatchdogActionStatus}");
             await RefreshWatchdogStatusAndLogAsync();
@@ -1056,6 +1111,7 @@ public sealed class MainViewModel : NotifyBase, IDisposable
         {
             WatchdogActionStatus = "Ошибка управления службой: " + ex.Message;
             Log(WatchdogActionStatus);
+            await RefreshWatchdogStatusAndLogAsync();
         }
     }
 

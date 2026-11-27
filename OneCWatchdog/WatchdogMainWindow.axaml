@@ -1,0 +1,370 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="OneCWatchdog.WatchdogMainWindow"
+        Title="{Binding WindowTitle}"
+        Icon="avares://1C-Watchdog/Assets/app.ico"
+        Width="1220" Height="820" MinWidth="960" MinHeight="640"
+        WindowStartupLocation="CenterScreen">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="18" RowSpacing="12">
+    <!-- Шапка -->
+    <Border Grid.Row="0" Classes="card" Padding="14,12">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+        <StackPanel Spacing="3">
+          <TextBlock Classes="h1" Text="{Binding HeaderTitle}"/>
+          <TextBlock Classes="muted" Text="{Binding PrivilegeStatusText}" FontSize="12"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Content="Перезапустить от администратора (UAC)"
+                  Command="{Binding ElevateCommand}"
+                  IsVisible="{Binding NeedsElevation}"
+                  Background="#7C4D00" Foreground="White"/>
+          <Border Background="#1D2A3F" CornerRadius="7" Padding="12,7" VerticalAlignment="Center">
+            <TextBlock Text="{Binding ServiceStatusText}" Foreground="{Binding ServiceStatusColor}" FontWeight="SemiBold"/>
+          </Border>
+          <Button Content="Обновить статус" Command="{Binding RefreshServiceStatusCommand}"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Вкладки настроек -->
+    <TabControl Grid.Row="1">
+      <!-- 1. Служба и тест -->
+      <TabItem Header="Служба и статус">
+        <ScrollViewer>
+          <StackPanel Spacing="12" Margin="0,10,0,0">
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Управление службой Windows (1CServerWatchdog)" FontSize="16" FontWeight="SemiBold"/>
+                <TextBlock Classes="muted" TextWrapping="Wrap"
+                           Text="Служба работает в фоне от имени LocalSystem (отложенный автозапуск, автоматический перезапуск при сбоях) и завершает дублирующиеся или зависшие сеансы 1С даже без входа пользователя в систему."/>
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" RowDefinitions="Auto,Auto" RowSpacing="4">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Classes="muted" Text="Файл конфигурации:"/>
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ConfigFilePath}"/>
+                  <TextBlock Grid.Row="1" Grid.Column="0" Classes="muted" Text="Каталог службы:"/>
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding InstallDirectoryPath}"/>
+                </Grid>
+
+                <CheckBox Content="Установить / обновить службу из текущего пути EXE (не копировать в Program Files)"
+                          IsChecked="{Binding InstallInPlace}"/>
+
+                <WrapPanel Orientation="Horizontal" ItemSpacing="8" LineSpacing="8">
+                  <Button Content="Установить / обновить службу" Command="{Binding InstallServiceCommand}" Background="#1F6FEB" Foreground="White"/>
+                  <Button Content="Запустить" Command="{Binding StartServiceCommand}" Background="#1B5E20" Foreground="White"/>
+                  <Button Content="Остановить" Command="{Binding StopServiceCommand}"/>
+                  <Button Content="Перезапустить" Command="{Binding RestartServiceCommand}"/>
+                  <Button Content="Удалить службу" Command="{Binding UninstallServiceCommand}" Background="#6B2027" Foreground="White"/>
+                  <Button Content="Проверить сеансы сейчас (Dry-Run)" Command="{Binding DryRunEvaluateCommand}" Background="#243B55" Foreground="White"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Classes="card">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Пробная оценка правил (Dry-Run без завершения сеансов)" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding PreviewSessionsSummary}" Classes="muted" TextWrapping="Wrap"/>
+                <DataGrid ItemsSource="{Binding PreviewTargets}" AutoGenerateColumns="False" IsReadOnly="True" Height="210">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Кластер" Binding="{Binding Session.ClusterId}" Width="140"/>
+                    <DataGridTextColumn Header="Сеанс" Binding="{Binding Session.SessionId}" Width="80"/>
+                    <DataGridTextColumn Header="Пользователь" Binding="{Binding Session.UserName}" Width="160"/>
+                    <DataGridTextColumn Header="База" Binding="{Binding Session.InfoBase}" Width="150"/>
+                    <DataGridTextColumn Header="Приложение" Binding="{Binding Session.AppId}" Width="130"/>
+                    <DataGridTextColumn Header="Причина" Binding="{Binding Reason}" Width="*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+
+            <Border Classes="card">
+              <StackPanel Spacing="6">
+                <TextBlock Text="Журнал операций GUI" FontWeight="SemiBold"/>
+                <TextBox Text="{Binding OperationLogText}" IsReadOnly="True" AcceptsReturn="True" Height="150"
+                         FontFamily="Consolas, Cascadia Mono, monospace" FontSize="12"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- 2. Подключение 1С -->
+      <TabItem Header="Подключение 1С">
+        <ScrollViewer>
+          <StackPanel Spacing="12" Margin="0,10,0,0">
+            <Border Classes="card">
+              <StackPanel Spacing="12">
+                <TextBlock Text="Утилита rac.exe и сервер администрирования (RAS)" FontSize="16" FontWeight="SemiBold"/>
+                <Grid ColumnDefinitions="220,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="10">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Путь к rac.exe" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding RacPath}" Watermark="Оставьте пустым для автопоиска"/>
+                  <Button Grid.Row="0" Grid.Column="2" Content="Автопоиск rac.exe" Command="{Binding FindRacCommand}"/>
+
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Адрес RAS (host:port)" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Endpoint}"/>
+                  <Button Grid.Row="1" Grid.Column="2" Content="Запустить RAS" Command="{Binding StartRasCommand}"/>
+
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="Агент кластера (host:port)" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding AgentEndpoint}"/>
+                  <Button Grid.Row="2" Grid.Column="2" Content="Проверить подключение" Command="{Binding TestConnectionCommand}" Background="#1F6FEB" Foreground="White"/>
+
+                  <TextBlock Grid.Row="3" Grid.Column="0" Text="Администратор кластера" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ClusterUser}" Watermark="Необязательно, если аутентификация не включена"/>
+
+                  <TextBlock Grid.Row="4" Grid.Column="0" Text="Пароль администратора" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding ClusterPassword}" PasswordChar="*" Watermark="Сохраняется в DPAPI LocalMachine"/>
+
+                  <TextBlock Grid.Row="5" Grid.Column="0" Text="Таймаут RAC (сек)" VerticalAlignment="Center"/>
+                  <NumericUpDown Grid.Row="5" Grid.Column="1" Value="{Binding RacTimeoutSeconds}" Minimum="15" Maximum="300" Width="160" HorizontalAlignment="Left"/>
+
+                  <TextBlock Grid.Row="6" Grid.Column="0" Text="Список кластеров (через запятую)" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding TargetClustersText}" Watermark="Пусто = основной кластер (если не включён опрос всех)"/>
+                </Grid>
+
+                <WrapPanel Orientation="Horizontal" ItemSpacing="18" LineSpacing="8">
+                  <CheckBox Content="Автоматически запускать ras.exe при необходимости" IsChecked="{Binding AutoStartRas}"/>
+                  <CheckBox Content="Перезапускать зависший ras.exe при сбоях" IsChecked="{Binding RestartHungRas}"/>
+                  <CheckBox Content="Мониторить все кластеры сервера 1С" IsChecked="{Binding MonitorAllClusters}"/>
+                </WrapPanel>
+
+                <Border Background="#111A29" CornerRadius="8" Padding="12" BorderBrush="#273449" BorderThickness="1">
+                  <TextBlock Text="{Binding ConnectionTestResult}" TextWrapping="Wrap"/>
+                </Border>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- 3. Правила контроля -->
+      <TabItem Header="Правила контроля">
+        <ScrollViewer>
+          <StackPanel Spacing="12" Margin="0,10,0,0">
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Режим работы и интервал проверки" FontSize="16" FontWeight="SemiBold"/>
+                <WrapPanel Orientation="Horizontal" ItemSpacing="18" LineSpacing="8">
+                  <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Интервал проверки (сек):" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding CheckIntervalSeconds}" Minimum="5" Maximum="3600" Width="130"/>
+                  </StackPanel>
+                  <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Подтверждений подряд (grace):" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding ConsecutiveChecksRequired}" Minimum="1" Maximum="20" Width="110"/>
+                  </StackPanel>
+                  <CheckBox Content="Режим Dry-Run (только логировать, не завершать сеансы)" IsChecked="{Binding DryRun}" VerticalAlignment="Center"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+              <Border Grid.Column="0" Classes="card">
+                <StackPanel Spacing="10">
+                  <TextBlock Text="Правила для дублирующихся сеансов" FontSize="15" FontWeight="SemiBold"/>
+                  <CheckBox Content="Завершать дублирующиеся сеансы" IsChecked="{Binding TerminateDuplicates}"/>
+                  <Grid ColumnDefinitions="190,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Группировка дублей:" VerticalAlignment="Center"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding GroupingModes}" SelectedItem="{Binding DuplicateGroupingMode}" HorizontalAlignment="Stretch"/>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Оставлять свежих сеансов:" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding DuplicateKeepNewestCount}" Minimum="1" Maximum="20" Width="130" HorizontalAlignment="Left"/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Мин. возраст дубля (сек):" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding DuplicateMinAgeSeconds}" Minimum="0" Maximum="86400" Width="130" HorizontalAlignment="Left"/>
+                  </Grid>
+                  <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                             Text="Full = База+Пользователь+Хост+Приложение; UserAndBase = строго по пользователю в базе; UserBaseApp = База+Пользователь+Приложение."/>
+                </StackPanel>
+              </Border>
+
+              <Border Grid.Column="1" Classes="card">
+                <StackPanel Spacing="10">
+                  <TextBlock Text="Правила для зависших сеансов" FontSize="15" FontWeight="SemiBold"/>
+                  <CheckBox Content="Завершать зависшие сеансы" IsChecked="{Binding TerminateHung}"/>
+                  <Grid ColumnDefinitions="230,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Макс. текущий вызов (мин, 0=выкл):" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="0" Grid.Column="1" Value="{Binding HungMaxCurrentCallMinutes}" Minimum="0" Maximum="14400" Width="130" HorizontalAlignment="Left"/>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Макс. вызов СУБД (мин, 0=выкл):" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding HungMaxDbCallMinutes}" Minimum="0" Maximum="14400" Width="130" HorizontalAlignment="Left"/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Макс. блокировка СУБД (мин, 0=выкл):" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding HungMaxBlockedMinutes}" Minimum="0" Maximum="14400" Width="130" HorizontalAlignment="Left"/>
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Макс. спящий сеанс (мин, 0=выкл):" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding HungMaxSleepingMinutes}" Minimum="0" Maximum="14400" Width="130" HorizontalAlignment="Left"/>
+                  </Grid>
+                  <CheckBox Content="Завершать зависшие только если блокируют другие сеансы" IsChecked="{Binding TerminateHungOnlyWhenBlockingOthers}"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Исключения и область действия" FontSize="15" FontWeight="SemiBold"/>
+                <WrapPanel Orientation="Horizontal" ItemSpacing="20" LineSpacing="8">
+                  <CheckBox Content="Не трогать Конфигуратор (Designer)" IsChecked="{Binding IgnoreConfigurator}"/>
+                  <CheckBox Content="Не трогать фоновые задания (BackgroundJob)" IsChecked="{Binding IgnoreBackgroundJobs}"/>
+                </WrapPanel>
+                <Grid ColumnDefinitions="240,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Исключённые пользователи:" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ExcludedUsersText}" Watermark="Имена через запятую, например: Администратор, ExchangeUser"/>
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Исключённые базы:" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ExcludedInfoBasesText}" Watermark="Имена баз через запятую"/>
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="Только указанные базы (TargetInfoBases):" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding TargetInfoBasesText}" Watermark="Пусто = все базы кластера (кроме исключённых)"/>
+                </Grid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- 4. Уведомления и обновления -->
+      <TabItem Header="Уведомления и обновления">
+        <ScrollViewer>
+          <StackPanel Spacing="12" Margin="0,10,0,0">
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Оповещения о действиях Watchdog (Telegram / Webhook / SMTP)" FontSize="15" FontWeight="SemiBold"/>
+                <WrapPanel Orientation="Horizontal" ItemSpacing="18" LineSpacing="8">
+                  <CheckBox Content="Оповещения включены" IsChecked="{Binding NotificationsEnabled}"/>
+                  <CheckBox Content="При завершении сеансов" IsChecked="{Binding NotifyOnWatchdogTermination}"/>
+                  <CheckBox Content="При обновлении версии" IsChecked="{Binding NotifyOnUpdates}"/>
+                  <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TextBlock Text="Cooldown (сек):" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding NotificationCooldownSeconds}" Minimum="5" Maximum="3600" Width="110"/>
+                  </StackPanel>
+                </WrapPanel>
+
+                <Grid ColumnDefinitions="200,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                  <CheckBox Grid.Row="0" Grid.Column="0" Content="Telegram Bot API" IsChecked="{Binding TelegramEnabled}"/>
+                  <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TelegramChatId}" Watermark="Chat ID (например, -1001234567890)"/>
+
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Telegram Bot Token" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding TelegramBotToken}" PasswordChar="*" Watermark="Хранится в DPAPI LocalMachine"/>
+
+                  <CheckBox Grid.Row="2" Grid.Column="0" Content="HTTP Webhook (JSON)" IsChecked="{Binding WebhookEnabled}"/>
+                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding WebhookUrl}" Watermark="https://..."/>
+
+                  <CheckBox Grid.Row="3" Grid.Column="0" Content="SMTP Email" IsChecked="{Binding EmailEnabled}"/>
+                  <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <TextBox Text="{Binding SmtpHost}" Width="260" Watermark="smtp.company.local"/>
+                    <NumericUpDown Value="{Binding SmtpPort}" Minimum="1" Maximum="65535" Width="120"/>
+                    <CheckBox Content="SSL/TLS" IsChecked="{Binding SmtpUseSsl}" VerticalAlignment="Center"/>
+                  </StackPanel>
+
+                  <TextBlock Grid.Row="4" Grid.Column="0" Text="SMTP логин / пароль" VerticalAlignment="Center"/>
+                  <Grid Grid.Row="4" Grid.Column="1" ColumnDefinitions="*,*" ColumnSpacing="8">
+                    <TextBox Grid.Column="0" Text="{Binding SmtpUser}" Watermark="Логин SMTP"/>
+                    <TextBox Grid.Column="1" Text="{Binding SmtpPassword}" PasswordChar="*" Watermark="Пароль SMTP (DPAPI)"/>
+                  </Grid>
+
+                  <TextBlock Grid.Row="5" Grid.Column="0" Text="Отправитель / Получатели" VerticalAlignment="Center"/>
+                  <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,*" ColumnSpacing="8">
+                    <TextBox Grid.Column="0" Text="{Binding EmailFrom}" Watermark="От кого (From)"/>
+                    <TextBox Grid.Column="1" Text="{Binding EmailTo}" Watermark="Кому (через запятую)"/>
+                  </Grid>
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                  <Button Content="Отправить тестовое уведомление" Command="{Binding SendTestNotificationCommand}"/>
+                  <TextBlock Text="{Binding NotificationStatus}" VerticalAlignment="Center" Classes="muted" TextWrapping="Wrap"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Автообновление 1C-Watchdog через GitHub Releases" FontSize="15" FontWeight="SemiBold"/>
+                <WrapPanel Orientation="Horizontal" ItemSpacing="18" LineSpacing="8">
+                  <CheckBox Content="Автоматически проверять и устанавливать обновления" IsChecked="{Binding AutoUpdateEnabled}"/>
+                  <CheckBox Content="Включать pre-release сборки" IsChecked="{Binding IncludePrereleases}"/>
+                  <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TextBlock Text="Интервал проверки (часы):" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding AutoUpdateCheckHours}" Minimum="1" Maximum="168" Width="110"/>
+                  </StackPanel>
+                </WrapPanel>
+                <Grid ColumnDefinitions="200,*" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Репозиторий GitHub" VerticalAlignment="Center"/>
+                  <Grid Grid.Row="0" Grid.Column="1" ColumnDefinitions="*,*" ColumnSpacing="8">
+                    <TextBox Grid.Column="0" Text="{Binding GitHubOwner}" Watermark="Owner"/>
+                    <TextBox Grid.Column="1" Text="{Binding GitHubRepository}" Watermark="Repository"/>
+                  </Grid>
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="GitHub Token (опционально)" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding GitHubToken}" PasswordChar="*" Watermark="Нужен только для приватного репозитория (DPAPI)"/>
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button Content="Проверить обновления" Command="{Binding CheckUpdatesCommand}"/>
+                  <Button Content="Установить обновление" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#1F6FEB" Foreground="White"/>
+                  <TextBlock Text="{Binding UpdateStatus}" VerticalAlignment="Center" Classes="muted" TextWrapping="Wrap"/>
+                </StackPanel>
+
+                <Border IsVisible="{Binding HasReleaseNotes}" Background="#111A29" CornerRadius="8" Padding="10" BorderBrush="#273449" BorderThickness="1">
+                  <TextBox Text="{Binding AvailableReleaseNotes}" IsReadOnly="True" AcceptsReturn="True" MaxHeight="160" TextWrapping="Wrap" Background="Transparent" BorderThickness="0"/>
+                </Border>
+              </StackPanel>
+            </Border>
+
+            <Border Classes="card">
+              <StackPanel Spacing="10">
+                <TextBlock Text="Хранение логов службы" FontSize="15" FontWeight="SemiBold"/>
+                <Grid ColumnDefinitions="200,*,Auto" ColumnSpacing="10" RowDefinitions="Auto,Auto" RowSpacing="8">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Каталог логов" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding LogDirectory}"/>
+                  <Button Grid.Row="0" Grid.Column="2" Content="Открыть папку" Command="{Binding OpenLogsFolderCommand}"/>
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Срок хранения (дней)" VerticalAlignment="Center"/>
+                  <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding LogRetentionDays}" Minimum="1" Maximum="365" Width="130" HorizontalAlignment="Left"/>
+                </Grid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- 5. Журнал работы -->
+      <TabItem Header="Журнал работы">
+        <Grid RowDefinitions="Auto,*" RowSpacing="10" Margin="0,10,0,0">
+          <Border Grid.Row="0" Classes="card" Padding="12">
+            <WrapPanel Orientation="Horizontal" ItemSpacing="10" LineSpacing="8">
+              <TextBlock Text="Уровень:" VerticalAlignment="Center"/>
+              <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding SelectedLogLevel}" Width="110"/>
+              <TextBox Text="{Binding LogFilterText}" Width="260" Watermark="Поиск по тексту лога…"/>
+              <CheckBox Content="Автообновление (5 сек)" IsChecked="{Binding AutoRefreshLogs}" VerticalAlignment="Center"/>
+              <Button Content="Обновить" Command="{Binding RefreshLogsCommand}"/>
+              <Button Content="Открыть файл" Command="{Binding OpenCurrentLogFileCommand}"/>
+              <Button Content="Папка логов" Command="{Binding OpenLogsFolderCommand}"/>
+            </WrapPanel>
+          </Border>
+          <Border Grid.Row="1" Classes="card" Padding="8">
+            <TextBox Text="{Binding FilteredLogText}" IsReadOnly="True" AcceptsReturn="True"
+                     FontFamily="Consolas, Cascadia Mono, monospace" FontSize="12"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+          </Border>
+        </Grid>
+      </TabItem>
+    </TabControl>
+
+    <!-- Нижняя панель действий -->
+    <Border Grid.Row="2" Classes="card" Padding="12,10">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" Classes="muted" TextWrapping="Wrap"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+          <Button Content="Перечитать с диска" Command="{Binding ReloadConfigCommand}"/>
+          <Button Content="Сохранить настройки" Command="{Binding SaveConfigCommand}" Background="#1F6FEB" Foreground="White"/>
+          <Button Content="Сохранить и перезапустить службу" Command="{Binding SaveAndRestartServiceCommand}" Background="#1B5E20" Foreground="White"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Модальное окно подтверждения -->
+    <Border x:Name="ConfirmOverlay" Grid.RowSpan="3" Background="#B0070B12" IsVisible="False" ZIndex="99">
+      <Border Classes="card" Width="460" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="20">
+        <StackPanel Spacing="14">
+          <TextBlock Text="Подтверждение действия" FontSize="17" FontWeight="SemiBold"/>
+          <TextBlock x:Name="ConfirmMessageText" TextWrapping="Wrap"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+            <Button Content="Отмена" Click="OnConfirmCancel"/>
+            <Button Content="Подтвердить" Background="#6B2027" Foreground="White" Click="OnConfirmOk"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+  </Grid>
+</Window>
