@@ -16,16 +16,21 @@ public sealed class WatchdogConfig
     public string EncryptedClusterPassword { get; set; } = "";
     public int RacTimeoutSeconds { get; set; } = 60;
     public bool AutoStartRas { get; set; } = true;
+    public bool RestartHungRas { get; set; } = true;
+    public bool MonitorAllClusters { get; set; } = false;
+    public List<string> TargetClusters { get; set; } = new();
 
     public int CheckIntervalSeconds { get; set; } = 30;
     public bool DryRun { get; set; } = false;
 
     public SessionPolicyOptions Policy { get; set; } = new();
+    public NotificationOptions Notifications { get; set; } = new();
 
     public string LogDirectory { get; set; } = DefaultLogDirectory;
     public int LogRetentionDays { get; set; } = 30;
 
     public bool AutoUpdateEnabled { get; set; } = true;
+    public bool IncludePrereleases { get; set; } = false;
     public int AutoUpdateCheckHours { get; set; } = 6;
     public string GitHubOwner { get; set; } = "zigorminsk-debug";
     public string GitHubRepository { get; set; } = "1C-Monitor";
@@ -59,7 +64,10 @@ public sealed class WatchdogConfig
         AgentEndpoint = AgentEndpoint,
         ClusterUser = ClusterUser,
         ClusterPassword = ClusterPassword,
-        TimeoutSeconds = RacTimeoutSeconds
+        TimeoutSeconds = RacTimeoutSeconds,
+        MonitorAllClusters = MonitorAllClusters,
+        TargetClusters = TargetClusters,
+        RestartHungRas = RestartHungRas
     };
 
     public static WatchdogConfig Load(string? path = null)
@@ -75,6 +83,9 @@ public sealed class WatchdogConfig
                     loaded.Policy ??= new SessionPolicyOptions();
                     loaded.Policy.ExcludedUsers ??= new();
                     loaded.Policy.ExcludedInfoBases ??= new();
+                    loaded.Policy.TargetInfoBases ??= new();
+                    loaded.TargetClusters ??= new();
+                    loaded.Notifications ??= new NotificationOptions();
                     if (string.IsNullOrWhiteSpace(loaded.LogDirectory))
                         loaded.LogDirectory = DefaultLogDirectory;
                     return loaded;

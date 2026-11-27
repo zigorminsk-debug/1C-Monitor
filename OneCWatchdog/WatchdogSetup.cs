@@ -113,16 +113,16 @@ public static class WatchdogSetup
             logger.Info("5. Регистрация источника журнала событий Windows (EventLog)…");
             EnsureEventLogSource(logger);
 
-            logger.Info("6. Регистрация службы Windows с правами LocalSystem и автозапуском…");
+            logger.Info("6. Регистрация службы Windows с правами LocalSystem и отложенным автозапуском…");
             var binPath = $"\"{targetExe}\" --service";
             var exists = await ServiceExistsAsync(WatchdogConfig.ServiceName);
             if (exists)
             {
-                await RunScStrictAsync("config", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= auto", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("config", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
             }
             else
             {
-                await RunScStrictAsync("create", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= auto", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
+                await RunScStrictAsync("create", WatchdogConfig.ServiceName, $"binPath= {binPath}", "start= delayed-auto", "depend= Tcpip", "obj= LocalSystem", $"DisplayName= {WatchdogConfig.ServiceDisplayName}");
             }
 
             await TryScAsync("description", WatchdogConfig.ServiceName, "Автоматическое отслеживание и завершение дублирующихся и зависших сеансов пользователей 1С:Предприятие 8.");

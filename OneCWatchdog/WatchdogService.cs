@@ -9,10 +9,13 @@ public sealed class WatchdogService : BackgroundService
     private readonly IHostApplicationLifetime _lifetime;
     private readonly WatchdogLogger _logger;
     private readonly RacClient _rac = new();
+    private readonly NotificationService _notifications = new();
     private readonly Dictionary<string, DateTime> _blockedSince = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _consecutiveHits = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _isServiceMode;
     private DateTime _lastUpdateCheckUtc = DateTime.MinValue;
     private DateTime _lastStatusLogUtc = DateTime.MinValue;
+    private int _consecutiveRacFailures;
 
     public WatchdogService(IHostApplicationLifetime lifetime, WatchdogLogger logger, bool isServiceMode)
     {
@@ -123,20 +126,27 @@ public sealed class WatchdogService : BackgroundService
 
         if (snapshot == null && config.AutoStartRas)
         {
+            _consecutiveRacFailures++;
             var racPath = candidates[0];
             try
             {
-                _logger.Warn($"RAS не отвечает ({lastError?.Message}). Попытка запуска ras.exe…", eventLog: false);
+                var backoffSec = Math.Min(120, 5 * (1 << Math.Min(4, _consecutiveRacFailures - 1)));
+                _logger.Warn($"RAS не отвечает ({lastError?.Message}). Попытка #{_consecutiveRacFailures} запуска ras.exe (таймаут/пауза {backoffSec}с)…", eventLog: false);
                 var readyEndpoint = await RacClient.EnsureRasRunningAsync(racPath, racOptions, msg => _logger.Info(msg), stoppingToken);
                 snapshot = await _rac.ReadRacAsync(racPath, readyEndpoint, racOptions, msg => _logger.Info(msg), stoppingToken);
                 connectedRac = racPath;
                 connectedEndpoint = readyEndpoint;
+                _consecutiveRacFailures = 0;
             }
             catch (Exception rasEx)
             {
                 _logger.Error($"Не удалось подключиться к RAC/RAS после попытки запуска: {rasEx.Message}", eventLog: false);
                 return;
             }
+        }
+        else if (snapshot != null)
+        {
+            _consecutiveRacFailures = 0;
         }
 
         if (snapshot == null || connectedRac == null || connectedEndpoint == null)
@@ -155,17 +165,18 @@ public sealed class WatchdogService : BackgroundService
         }
 
         var now = DateTime.Now;
-        var targets = SessionAnalyzer.EvaluateWatchdogTargets(snapshot.Sessions, config.Policy, _blockedSince, now);
+        var targets = SessionAnalyzer.EvaluateWatchdogTargets(snapshot.Sessions, config.Policy, _blockedSince, now, _consecutiveHits);
 
         if (DateTime.UtcNow - _lastStatusLogUtc >= TimeSpan.FromMinutes(15) || targets.Count > 0)
         {
             _lastStatusLogUtc = DateTime.UtcNow;
-            _logger.Info($"Проверка кластера {snapshot.ClusterId}: всего сеансов={snapshot.Sessions.Count}, к завершению={targets.Count}");
+            _logger.Info($"Проверка кластера {snapshot.ClusterId} (всего кластеров={snapshot.ClusterIds.Count}): всего сеансов={snapshot.Sessions.Count}, к завершению={targets.Count}");
         }
 
         foreach (var item in targets)
         {
             var s = item.Session;
+            var targetCluster = string.IsNullOrWhiteSpace(s.ClusterId) ? snapshot.ClusterId : s.ClusterId;
             var summary = $"пользователь='{s.UserName}', база='{s.InfoBase}', хост='{s.Host}', приложение='{s.AppId}', PID={s.Pid}, начало='{s.StartedAt}', UUID={s.SessionUuid}. Причина: {item.Reason}";
 
             if (config.DryRun)
@@ -179,7 +190,7 @@ public sealed class WatchdogService : BackgroundService
                 await RacClient.TerminateSessionAsync(
                     connectedRac,
                     connectedEndpoint,
-                    snapshot.ClusterId,
+                    targetCluster,
                     s.SessionUuid,
                     config.ClusterUser,
                     config.ClusterPassword,
@@ -187,6 +198,18 @@ public sealed class WatchdogService : BackgroundService
                     stoppingToken);
 
                 _logger.Warn($"Сеанс завершён: {summary}", eventLog: true);
+
+                if (config.Notifications.Enabled && config.Notifications.NotifyOnWatchdogTermination)
+                {
+                    var notifyErrors = await _notifications.SendAsync(
+                        config.Notifications,
+                        "1C Watchdog: завершён сеанс",
+                        summary,
+                        dedupKey: $"term:{s.SessionUuid}",
+                        bypassCooldown: true,
+                        cancellationToken: stoppingToken);
+                    foreach (var err in notifyErrors) _logger.Warn("Уведомление: " + err, eventLog: false);
+                }
             }
             catch (Exception ex)
             {
@@ -212,7 +235,7 @@ public sealed class WatchdogService : BackgroundService
             repository: config.GitHubRepository,
             gitHubToken: config.GitHubToken);
 
-        var result = await updater.CheckForUpdateAsync(cancellationToken: stoppingToken);
+        var result = await updater.CheckForUpdateAsync(includePrereleases: config.IncludePrereleases, cancellationToken: stoppingToken);
         _logger.Info($"Автообновление: {result.Message}");
 
         if (!result.IsUpdateAvailable) return false;
@@ -233,6 +256,16 @@ public sealed class WatchdogService : BackgroundService
         _logger.Warn(
             $"Запуск установки обновления 1C Watchdog до версии {result.LatestVersion}…",
             eventLog: true);
+
+        if (config.Notifications.Enabled && config.Notifications.NotifyOnUpdates)
+        {
+            await _notifications.SendAsync(
+                config.Notifications,
+                "1C Watchdog: установка обновления",
+                $"Обновление службы с {result.CurrentVersion} на {result.LatestVersion}",
+                bypassCooldown: true,
+                cancellationToken: stoppingToken);
+        }
 
         GitHubAutoUpdater.LaunchUpdaterAndExit(
             stagedSourceDir: stagedDir,

@@ -72,10 +72,12 @@ public sealed class GitHubAutoUpdater
     public static string CurrentRuntimeRid() =>
         RuntimeInformation.ProcessArchitecture == Architecture.X86 ? "win-x86" : "win-x64";
 
-    public async Task<UpdateCheckResult> CheckForUpdateAsync(string? currentVersion = null, CancellationToken cancellationToken = default)
+    public async Task<UpdateCheckResult> CheckForUpdateAsync(string? currentVersion = null, bool includePrereleases = false, CancellationToken cancellationToken = default)
     {
         var current = string.IsNullOrWhiteSpace(currentVersion) ? GetCurrentVersion() : currentVersion;
-        var apiUrl = $"https://api.github.com/repos/{Owner}/{Repository}/releases/latest";
+        var apiUrl = includePrereleases
+            ? $"https://api.github.com/repos/{Owner}/{Repository}/releases?per_page=10"
+            : $"https://api.github.com/repos/{Owner}/{Repository}/releases/latest";
 
         using var req = new HttpRequestMessage(HttpMethod.Get, apiUrl);
         ConfigureGitHubHeaders(req, "application/vnd.github+json", current);
@@ -94,8 +96,22 @@ public sealed class GitHubAutoUpdater
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(cancellationToken);
-        var release = JsonSerializer.Deserialize<GitHubReleaseDto>(json)
-            ?? throw new Exception("Пустой ответ GitHub Releases API");
+        GitHubReleaseDto? release;
+        if (includePrereleases)
+        {
+            var list = JsonSerializer.Deserialize<List<GitHubReleaseDto>>(json) ?? new();
+            release = list.FirstOrDefault(r => !r.Draft);
+            if (release == null)
+            {
+                return new UpdateCheckResult(false, current, current, "", "", null, null, null, null, null,
+                    "На GitHub пока нет опубликованных релизов.");
+            }
+        }
+        else
+        {
+            release = JsonSerializer.Deserialize<GitHubReleaseDto>(json)
+                ?? throw new Exception("Пустой ответ GitHub Releases API");
+        }
 
         var latest = (release.TagName ?? release.Name ?? "").Trim().TrimStart('v', 'V');
         if (string.IsNullOrWhiteSpace(latest)) latest = current;
@@ -156,7 +172,7 @@ public sealed class GitHubAutoUpdater
             try
             {
                 await DownloadAssetAsync(update.ChecksumsApiUrl, update.ChecksumsDownloadUrl, sumsPath, update.CurrentVersion, cancellationToken);
-                VerifyChecksumIfListed(downloadedFile, update.AssetName, sumsPath, log);
+                VerifyFileSha256(downloadedFile, update.AssetName, sumsPath, log);
             }
             catch (Exception ex) when (ex is not CryptographicException)
             {
@@ -196,6 +212,7 @@ public sealed class GitHubAutoUpdater
         var currentPid = Environment.ProcessId;
         var scriptPath = Path.Combine(Path.GetDirectoryName(stagedSourceDir)!, "apply-update.ps1");
         var logPath = Path.Combine(Path.GetDirectoryName(stagedSourceDir)!, "apply-update.log");
+        var backupDirPath = Path.Combine(Path.GetDirectoryName(stagedSourceDir)!, "backup");
         var relaunchArgString = relaunchArgs is { Length: > 0 }
             ? string.Join(" ", relaunchArgs.Select(a => $"\"{a.Replace("\"", "`\"")}\""))
             : "";
@@ -205,6 +222,7 @@ $ErrorActionPreference = 'Stop'
 $targetExe = '{{EscapePs(targetExePath)}}'
 $targetDir = '{{EscapePs(targetDir)}}'
 $sourceDir = '{{EscapePs(stagedSourceDir)}}'
+$backupDir = '{{EscapePs(backupDirPath)}}'
 $exeName = '{{EscapePs(executableName)}}'
 $serviceName = '{{EscapePs(windowsServiceName ?? "")}}'
 $waitPid = {{currentPid}}
@@ -239,16 +257,21 @@ if (Get-Process -Id $waitPid -ErrorAction SilentlyContinue) {
     Start-Sleep -Seconds 1
 }
 
-$backupExe = "$targetExe.bak"
-if (Test-Path $targetExe) {
-    Copy-Item -Path $targetExe -Destination $backupExe -Force
+New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+Get-ChildItem -Path $sourceDir -File | ForEach-Object {
+    $existing = Join-Path $targetDir $_.Name
+    if (Test-Path $existing) {
+        Copy-Item -Path $existing -Destination (Join-Path $backupDir $_.Name) -Force
+    }
 }
+$backupExe = Join-Path $backupDir $exeName
 
-$newExe = Join-Path $sourceDir $exeName
 $copied = $false
 for ($i = 1; $i -le 15; $i++) {
     try {
-        Copy-Item -Path $newExe -Destination $targetExe -Force
+        Get-ChildItem -Path $sourceDir -File | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination (Join-Path $targetDir $_.Name) -Force
+        }
         $copied = $true
         break
     } catch {
@@ -257,9 +280,16 @@ for ($i = 1; $i -le 15; $i++) {
     }
 }
 
+function Restore-Backup {
+    Write-UpdateLog "Restoring backup from $backupDir"
+    Get-ChildItem -Path $backupDir -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination (Join-Path $targetDir $_.Name) -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if (-not $copied) {
     Write-UpdateLog "Failed to replace $targetExe, restoring backup"
-    if (Test-Path $backupExe) { Copy-Item -Path $backupExe -Destination $targetExe -Force }
+    Restore-Backup
     if ($serviceName) { Start-Service -Name $serviceName -ErrorAction SilentlyContinue }
     exit 1
 }
@@ -269,22 +299,42 @@ Write-UpdateLog "Replaced $targetExe successfully"
 if ($serviceName) {
     try {
         Start-Service -Name $serviceName -ErrorAction Stop
-        Write-UpdateLog "Service $serviceName started"
-    } catch {
-        Write-UpdateLog "Start-Service failed ($_); rolling back"
-        if (Test-Path $backupExe) {
-            Copy-Item -Path $backupExe -Destination $targetExe -Force
-            Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 8
+        $svc = Get-Service -Name $serviceName -ErrorAction Stop
+        if ($svc.Status -ne 'Running') {
+            throw "Service status after update is $($svc.Status)"
         }
+        Write-UpdateLog "Service $serviceName verified Running after update"
+    } catch {
+        Write-UpdateLog "Service healthcheck failed ($_); rolling back"
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        Restore-Backup
+        Start-Service -Name $serviceName -ErrorAction SilentlyContinue
         exit 1
     }
 } elseif ($relaunch) {
-    if ($relaunchArgs) {
-        Start-Process -FilePath $targetExe -ArgumentList $relaunchArgs
-    } else {
-        Start-Process -FilePath $targetExe
+    try {
+        $startedProc = if ($relaunchArgs) {
+            Start-Process -FilePath $targetExe -ArgumentList $relaunchArgs -PassThru
+        } else {
+            Start-Process -FilePath $targetExe -PassThru
+        }
+        Start-Sleep -Seconds 5
+        if ($startedProc.HasExited -and $startedProc.ExitCode -ne 0) {
+            throw "Updated process exited immediately with code $($startedProc.ExitCode)"
+        }
+        Write-UpdateLog "Relaunched $targetExe (PID=$($startedProc.Id))"
+    } catch {
+        Write-UpdateLog "App healthcheck failed ($_); rolling back"
+        Restore-Backup
+        if ($relaunchArgs) {
+            Start-Process -FilePath $targetExe -ArgumentList $relaunchArgs
+        } else {
+            Start-Process -FilePath $targetExe
+        }
+        exit 1
     }
-    Write-UpdateLog "Relaunched $targetExe"
 }
 """;
 
@@ -332,7 +382,7 @@ if ($serviceName) {
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", GitHubToken);
     }
 
-    private static void VerifyChecksumIfListed(string filePath, string assetName, string sumsPath, Action<string>? log)
+    public static void VerifyFileSha256(string filePath, string assetName, string sumsPath, Action<string>? log = null)
     {
         var lines = File.ReadAllLines(sumsPath);
         var expected = lines
@@ -367,6 +417,8 @@ if ($serviceName) {
         [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("body")] public string? Body { get; set; }
         [JsonPropertyName("html_url")] public string? HtmlUrl { get; set; }
+        [JsonPropertyName("draft")] public bool Draft { get; set; }
+        [JsonPropertyName("prerelease")] public bool Prerelease { get; set; }
         [JsonPropertyName("assets")] public List<GitHubAssetDto>? Assets { get; set; }
     }
 
