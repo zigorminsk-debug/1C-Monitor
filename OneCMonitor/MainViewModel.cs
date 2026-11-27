@@ -425,6 +425,12 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             var watchdogExe = Path.Combine(dir, "1C-Watchdog.exe");
             if (!File.Exists(watchdogExe))
             {
+                var installedExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "1CServerMonitor", "Watchdog", "1C-Watchdog.exe");
+                if (File.Exists(installedExe))
+                    watchdogExe = installedExe;
+            }
+            if (!File.Exists(watchdogExe))
+            {
                 AdminActionStatus = $"Файл 1C-Watchdog.exe не найден рядом с приложением ({dir})";
                 Log(AdminActionStatus);
                 return;
@@ -432,11 +438,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
 
             Process.Start(new ProcessStartInfo(watchdogExe)
             {
-                Arguments = "--setup",
+                Arguments = "--gui",
                 UseShellExecute = true,
                 Verb = "runas"
             });
-            AdminActionStatus = "Запущен мастер установки службы 1C Watchdog";
+            AdminActionStatus = "Запущена GUI-панель настройки службы 1C Watchdog";
             Log(AdminActionStatus);
         }
         catch (Exception ex)
