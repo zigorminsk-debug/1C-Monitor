@@ -187,19 +187,31 @@ public sealed class WatchdogService : BackgroundService
 
             try
             {
-                await RacClient.TerminateSessionAsync(
+                var termResult = await RacClient.TerminateSessionWithCheckAsync(
                     connectedRac,
                     connectedEndpoint,
                     targetCluster,
                     s.SessionUuid,
                     config.ClusterUser,
                     config.ClusterPassword,
-                    Math.Max(15, config.RacTimeoutSeconds),
+                    Math.Clamp(config.RacTimeoutSeconds, 15, 30),
                     stoppingToken);
 
-                _logger.Warn($"Сеанс завершён: {summary}", eventLog: true);
+                switch (termResult.Outcome)
+                {
+                    case RacClient.TerminateSessionOutcome.AlreadyGone:
+                        _logger.Info($"Сеанс уже завершился до отключения: {summary}");
+                        break;
+                    case RacClient.TerminateSessionOutcome.VerifiedTerminatedAfterError:
+                        _logger.Warn($"Сеанс завершён (подтверждено опросом RAC; ответ утилиты: {termResult.Note}): {summary}", eventLog: true);
+                        break;
+                    default:
+                        _logger.Warn($"Сеанс завершён: {summary}", eventLog: true);
+                        break;
+                }
 
-                if (config.Notifications.Enabled && config.Notifications.NotifyOnWatchdogTermination)
+                if (termResult.Outcome != RacClient.TerminateSessionOutcome.AlreadyGone &&
+                    config.Notifications.Enabled && config.Notifications.NotifyOnWatchdogTermination)
                 {
                     var notifyErrors = await _notifications.SendAsync(
                         config.Notifications,
@@ -213,7 +225,7 @@ public sealed class WatchdogService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.Error($"Ошибка завершения сеанса ({summary}): {ex.Message}", eventLog: true);
+                _logger.Error($"Ошибка завершения сеанса: {ex.Message} | {summary}", eventLog: true);
             }
         }
     }

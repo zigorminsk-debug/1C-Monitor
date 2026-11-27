@@ -7,7 +7,7 @@
     <AssemblyName>1C-Watchdog</AssemblyName>
     <RootNamespace>OneCWatchdog</RootNamespace>
     <ApplicationIcon>Assets/app.ico</ApplicationIcon>
-    <Version>1.6.0</Version>
+    <Version>1.7.0</Version>
     <Authors>Zakharevich Igor</Authors>
     <Company>ООО «Компьютерная безопасность»</Company>
     <Product>1C Server Monitor Watchdog</Product>

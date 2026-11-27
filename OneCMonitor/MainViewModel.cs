@@ -848,8 +848,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             try
             {
                 var clusterId = string.IsNullOrWhiteSpace(s.ClusterId) ? _lastClusterId : s.ClusterId;
-                await RacClient.TerminateSessionAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Max(15, (int)Settings.RacTimeoutSeconds));
-                ok++; Log($"Сеанс завершён: {s.UserName}, UUID {s.SessionUuid}");
+                var res = await RacClient.TerminateSessionWithCheckAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Clamp((int)Settings.RacTimeoutSeconds, 15, 30));
+                ok++;
+                Log(res.Outcome == RacClient.TerminateSessionOutcome.AlreadyGone
+                    ? $"Сеанс уже завершился: {s.UserName}, UUID {s.SessionUuid}"
+                    : $"Сеанс завершён: {s.UserName}, UUID {s.SessionUuid}");
             }
             catch (Exception ex) { errors++; Log($"Не завершён сеанс {s.UserName}: {ex.Message}"); }
         }
@@ -913,8 +916,11 @@ public sealed class MainViewModel : NotifyBase, IDisposable
             try
             {
                 var clusterId = string.IsNullOrWhiteSpace(s.ClusterId) ? _lastClusterId : s.ClusterId;
-                await RacClient.TerminateSessionAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Max(15, (int)Settings.RacTimeoutSeconds));
-                ok++; Log($"Сеанс завершён вручную: {s.UserName}, UUID {s.SessionUuid}");
+                var res = await RacClient.TerminateSessionWithCheckAsync(_lastRacPath, Settings.Endpoint, clusterId, s.SessionUuid, Settings.ClusterUser, Settings.ClusterPassword, Math.Clamp((int)Settings.RacTimeoutSeconds, 15, 30));
+                ok++;
+                Log(res.Outcome == RacClient.TerminateSessionOutcome.AlreadyGone
+                    ? $"Сеанс уже завершился: {s.UserName}, UUID {s.SessionUuid}"
+                    : $"Сеанс завершён вручную: {s.UserName}, UUID {s.SessionUuid}");
             }
             catch (Exception ex) { errors++; Log($"Ошибка завершения сеанса {s.UserName}: {ex.Message}"); }
         }

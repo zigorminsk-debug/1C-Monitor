@@ -59,4 +59,22 @@ public sealed class RacClientTests
         var fromHost = RacClient.EndpointCandidates("localhost:1545").ToList();
         Assert.Equal(new[] { "localhost:1545", "127.0.0.1:1545" }, fromHost);
     }
+
+    [Fact]
+    public void SessionTerminationHelpers_DetectNotFoundAuthAndExistingSession()
+    {
+        Assert.True(RacClient.IsSessionNotFoundMessage("Сеанс с указанным идентификатором не найден"));
+        Assert.True(RacClient.IsSessionNotFoundMessage("Session not found"));
+        Assert.False(RacClient.IsSessionNotFoundMessage("Превышено время ожидания rac.exe"));
+
+        Assert.True(RacClient.IsClusterAuthErrorMessage("Администратор кластера не аутентифицирован"));
+        Assert.False(RacClient.IsClusterAuthErrorMessage("Сеанс не найден"));
+
+        var listOutput = """
+            session : 11111111-1111-1111-1111-111111111111
+            user-name : Иванов
+            """;
+        Assert.True(RacClient.SessionExistsInOutput(listOutput, "11111111-1111-1111-1111-111111111111"));
+        Assert.False(RacClient.SessionExistsInOutput(listOutput, "22222222-2222-2222-2222-222222222222"));
+    }
 }

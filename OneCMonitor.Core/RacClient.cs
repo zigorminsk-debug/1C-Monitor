@@ -558,6 +558,86 @@ public sealed class RacClient
         throw new Exception($"RAS не ответил за {timeout} с. RAC: {racPath}; RAS: {ras}; конечная точка: {options.Endpoint}; агент: {options.AgentEndpoint}. Последняя ошибка: {last?.Message}");
     }
 
+    public enum TerminateSessionOutcome
+    {
+        Terminated,
+        AlreadyGone,
+        VerifiedTerminatedAfterError
+    }
+
+    public sealed record TerminateSessionResult(TerminateSessionOutcome Outcome, string? Note = null);
+
+    public static bool IsSessionNotFoundMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        return message.Contains("не найден", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("does not exist", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("отсутствует", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsClusterAuthErrorMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        return message.Contains("не аутентифицирован", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("not authenticated", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("authentication", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool SessionExistsInOutput(string sessionListOutput, string sessionUuid)
+    {
+        if (string.IsNullOrWhiteSpace(sessionListOutput) || string.IsNullOrWhiteSpace(sessionUuid))
+            return false;
+        var normTarget = RacHelpers.Normalize(sessionUuid);
+        return ParseRecords(sessionListOutput)
+            .Any(r => string.Equals(RacHelpers.Normalize(r.Get("session")), normTarget, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static async Task<TerminateSessionResult> TerminateSessionWithCheckAsync(
+        string racPath,
+        string endpoint,
+        string clusterId,
+        string sessionUuid,
+        string? clusterUser,
+        string? clusterPassword,
+        int timeoutSeconds = 15,
+        CancellationToken cancellationToken = default)
+    {
+        var perCallTimeout = Math.Clamp(timeoutSeconds, 15, 30);
+        try
+        {
+            await TerminateSessionAsync(racPath, endpoint, clusterId, sessionUuid, clusterUser, clusterPassword, perCallTimeout, cancellationToken);
+            return new TerminateSessionResult(TerminateSessionOutcome.Terminated);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            if (IsSessionNotFoundMessage(ex.Message))
+                return new TerminateSessionResult(TerminateSessionOutcome.AlreadyGone, ex.Message);
+
+            if (!IsClusterAuthErrorMessage(ex.Message))
+            {
+                try
+                {
+                    var checkArgs = new List<string> { "session", "list", $"--cluster={clusterId}" };
+                    if (!string.IsNullOrWhiteSpace(clusterUser))
+                    {
+                        checkArgs.Add($"--cluster-user={clusterUser}");
+                        checkArgs.Add($"--cluster-pwd={clusterPassword ?? ""}");
+                    }
+                    checkArgs.Add(endpoint);
+                    var output = await RunAsync(racPath, checkArgs, perCallTimeout, cancellationToken);
+                    if (!SessionExistsInOutput(output, sessionUuid))
+                        return new TerminateSessionResult(TerminateSessionOutcome.VerifiedTerminatedAfterError, ex.Message);
+                }
+                catch
+                {
+                }
+            }
+
+            throw;
+        }
+    }
+
     public static async Task TerminateSessionAsync(string racPath, string endpoint, string clusterId, string sessionUuid, string? clusterUser, string? clusterPassword, int timeoutSeconds = 15, CancellationToken cancellationToken = default)
     {
         var auth = new List<string> { $"--cluster={clusterId}" };
@@ -567,14 +647,15 @@ public sealed class RacClient
             auth.Add($"--cluster-pwd={clusterPassword ?? ""}");
         }
 
+        // Стандартный синтаксис rac.exe 8.3: rac session terminate --cluster=... --session=... <endpoint>
         var variants = new List<List<string>>
         {
-            new() { "session" },
             new() { "session", "terminate" },
+            new() { "session" },
             new() { endpoint, "session" }
         };
-        variants[0].AddRange(auth); variants[0].Add("terminate"); variants[0].Add($"--session={sessionUuid}"); variants[0].Add(endpoint);
-        variants[1].AddRange(auth); variants[1].Add($"--session={sessionUuid}"); variants[1].Add(endpoint);
+        variants[0].AddRange(auth); variants[0].Add($"--session={sessionUuid}"); variants[0].Add(endpoint);
+        variants[1].AddRange(auth); variants[1].Add("terminate"); variants[1].Add($"--session={sessionUuid}"); variants[1].Add(endpoint);
         variants[2].AddRange(auth); variants[2].Add("terminate"); variants[2].Add($"--session={sessionUuid}");
 
         Exception? last = null;
@@ -585,7 +666,12 @@ public sealed class RacClient
                 await RunAsync(racPath, args, timeoutSeconds, cancellationToken);
                 return;
             }
-            catch (Exception ex) { last = ex; }
+            catch (Exception ex)
+            {
+                last = ex;
+                if (IsSessionNotFoundMessage(ex.Message) || IsClusterAuthErrorMessage(ex.Message))
+                    throw;
+            }
         }
         throw last ?? new Exception("Не удалось завершить сеанс через RAC");
     }
