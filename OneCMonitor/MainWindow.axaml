@@ -1,21 +1,25 @@
 <Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:controls="clr-namespace:OneCMonitor.Controls" x:Class="OneCMonitor.MainWindow" Title="{Binding WindowTitle}" Icon="/Assets/app.ico" Width="1450" Height="900" MinWidth="1050" MinHeight="680" mc:Ignorable="d">
-  <Grid RowDefinitions="138,*,72">
-    <Border Grid.Row="0" Background="#111A29" BorderBrush="#273449" BorderThickness="0,0,0,1" Padding="20,10">
-      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="12">
-        <Border Background="#263B22" CornerRadius="8" Padding="11,7" VerticalAlignment="Center"><TextBlock Text="1C" Foreground="#FACC15" FontSize="20" FontWeight="Bold"/></Border>
+  <Grid RowDefinitions="Auto,*,Auto" Margin="18" RowSpacing="12">
+    <Border Grid.Row="0" Classes="card" Padding="14,12">
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10">
+        <Border Background="#1D2A3F" BorderBrush="#273449" BorderThickness="1" CornerRadius="8" Padding="11,7" VerticalAlignment="Center">
+          <TextBlock Text="1C" Foreground="#60A5FA" FontSize="20" FontWeight="Bold"/>
+        </Border>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
-          <TextBlock Text="{Binding ServerHeaderTitle}" FontWeight="SemiBold" FontSize="24"/>
-          <TextBlock Text="{Binding ServerHeaderDetails}" Foreground="#B8C7DB" FontSize="13" LineHeight="19" TextWrapping="Wrap" MaxLines="5"/>
+          <TextBlock Text="{Binding ServerHeaderTitle}" FontWeight="SemiBold" FontSize="20"/>
+          <TextBlock Text="{Binding ServerHeaderDetails}" Classes="muted" FontSize="12" LineHeight="18" TextWrapping="Wrap" MaxLines="5"/>
         </StackPanel>
-        <TextBlock Grid.Column="2" Text="{Binding Status}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{Binding StatusColor}" MaxWidth="360" TextWrapping="Wrap" ToolTip.Tip="{Binding Status}"/>
-        <Button Grid.Column="3" Content="Установить обновление" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#065F46" VerticalAlignment="Center"/>
-        <Button Grid.Column="4" Content="Обновить" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
+        <Border Grid.Column="2" Background="#1D2A3F" CornerRadius="7" Padding="12,7" VerticalAlignment="Center" MaxWidth="360">
+          <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontWeight="SemiBold" TextWrapping="Wrap" ToolTip.Tip="{Binding Status}"/>
+        </Border>
+        <Button Grid.Column="3" Content="Установить обновление" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#1F6FEB" Foreground="White" VerticalAlignment="Center"/>
+        <Button Grid.Column="4" Content="Обновить" Command="{Binding RefreshCommand}" Background="#243B55" Foreground="White" VerticalAlignment="Center"/>
         <Button Grid.Column="5" Content="Отчёт HTML" Command="{Binding ExportCommand}" VerticalAlignment="Center"/>
         <ToggleSwitch Grid.Column="6" IsChecked="{Binding IsRunning}" OnContent="Мониторинг" OffContent="Пауза" VerticalAlignment="Center"/>
       </Grid>
     </Border>
 
-    <TabControl x:Name="MainTabs" Grid.Row="1" Margin="16">
+    <TabControl x:Name="MainTabs" Grid.Row="1">
       <TabItem Header="Обзор">
         <ScrollViewer><StackPanel Spacing="14" Margin="0,12,0,0">
           <Grid ColumnDefinitions="*,*,*,*,*" ColumnSpacing="12">
@@ -140,34 +144,34 @@
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Управление сеансами через RAC" FontSize="17" FontWeight="SemiBold"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Завершить все сеансы" Command="{Binding TerminateAllSessionsCommand}" Margin="0,0,10,10" Background="#7F1D1D"/>
-              <Button Content="Выгрузить всех, кроме Конфигуратора" Command="{Binding TerminateExceptConfiguratorCommand}" Margin="0,0,10,10" Background="#7F1D1D"/>
-              <Button Content="Удалить ранние дубликаты" Command="{Binding TerminateDuplicateSessionsCommand}" Margin="0,0,10,10"/>
-              <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10"/>
+              <Button Content="Завершить все сеансы" Command="{Binding TerminateAllSessionsCommand}" Margin="0,0,10,10" Background="#6B2027" Foreground="White"/>
+              <Button Content="Выгрузить всех, кроме Конфигуратора" Command="{Binding TerminateExceptConfiguratorCommand}" Margin="0,0,10,10" Background="#6B2027" Foreground="White"/>
+              <Button Content="Удалить ранние дубликаты" Command="{Binding TerminateDuplicateSessionsCommand}" Margin="0,0,10,10" Background="#243B55" Foreground="White"/>
+              <Button Content="Завершить спящие сеансы" Command="{Binding TerminateSleepingSessionsCommand}" Margin="0,0,10,10" Background="#243B55" Foreground="White"/>
             </WrapPanel>
             <TextBlock Text="Дубликаты определяются по базе, пользователю, компьютеру и приложению. Сохраняется самый новый сеанс, более ранние завершаются." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Фоновые и регламентные задания" FontSize="17" FontWeight="SemiBold"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Выключить фоновые задания" Command="{Binding DisableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#92400E"/>
-              <Button Content="Включить фоновые задания" Command="{Binding EnableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#065F46"/>
+              <Button Content="Выключить фоновые задания" Command="{Binding DisableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#7C4D00" Foreground="White"/>
+              <Button Content="Включить фоновые задания" Command="{Binding EnableBackgroundJobsCommand}" Margin="0,0,10,10" Background="#1B5E20" Foreground="White"/>
             </WrapPanel>
             <TextBlock Text="Выключение устанавливает scheduled-jobs-deny=on во всех найденных базах и завершает уже работающие фоновые сеансы. Включение снимает запрет только с баз, которые были выключены этим монитором; изначально запрещённые базы не затрагиваются. Требуется фраза ПОДТВЕРЖДАЮ." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Службы и процессы Windows" FontSize="17" FontWeight="SemiBold"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Плавно вывести выбранный rphost" Command="{Binding GracefulTurnOffCommand}" Margin="0,0,10,10" Background="#065F46"/>
-              <Button Content="Перезапустить ВСЕ службы сервера 1С" Command="{Binding RestartOneCServicesCommand}" Margin="0,0,10,10" Background="#92400E"/>
-              <Button Content="Принудительно завершить ВСЕ rphost" Command="{Binding KillAllRphostCommand}" Margin="0,0,10,10" Background="#991B1B"/>
+              <Button Content="Плавно вывести выбранный rphost" Command="{Binding GracefulTurnOffCommand}" Margin="0,0,10,10" Background="#1B5E20" Foreground="White"/>
+              <Button Content="Перезапустить ВСЕ службы сервера 1С" Command="{Binding RestartOneCServicesCommand}" Margin="0,0,10,10" Background="#7C4D00" Foreground="White"/>
+              <Button Content="Принудительно завершить ВСЕ rphost" Command="{Binding KillAllRphostCommand}" Margin="0,0,10,10" Background="#6B2027" Foreground="White"/>
             </WrapPanel>
             <TextBlock Text="Для плавного вывода сначала выберите строку процесса на вкладке «Обзор». Команда process turn-off прекращает назначение новой нагрузки, но не убивает текущие вызовы. Службы определяются по ragent.exe в PathName. Красная кнопка rphost выполняет taskkill /F /IM rphost.exe." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автономная служба контроля сеансов (1C Watchdog)" FontSize="17" FontWeight="SemiBold"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Открыть панель настройки 1C Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,10" Background="#1D4ED8"/>
+              <Button Content="Открыть панель настройки 1C Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,10" Background="#1F6FEB" Foreground="White"/>
             </WrapPanel>
             <TextBlock Text="Запускает графическую панель 1C-Watchdog.exe (--gui) с запросом прав администратора (UAC): установка/удаление службы Windows от имени LocalSystem с автозапуском и автовосстановлением, защищённые права NTFS, настройка RAC/RAS, правила контроля, уведомления, Dry-Run тест и журнал работы." Classes="muted" TextWrapping="Wrap"/>
           </StackPanel></Border>
@@ -180,11 +184,11 @@
             <TextBlock Text="Состояние системной службы 1C Watchdog (LocalSystem)" FontSize="17" FontWeight="SemiBold"/>
             <TextBlock Text="{Binding WatchdogServiceStatus}" FontSize="16" FontWeight="SemiBold" Foreground="#60A5FA"/>
             <WrapPanel Orientation="Horizontal">
-              <Button Content="Открыть настройки Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,8" Background="#1D4ED8"/>
-              <Button Content="Запустить службу" Command="{Binding StartWatchdogServiceCommand}" Margin="0,0,10,8" Background="#065F46"/>
-              <Button Content="Остановить службу" Command="{Binding StopWatchdogServiceCommand}" Margin="0,0,10,8" Background="#92400E"/>
+              <Button Content="Открыть настройки Watchdog (GUI, UAC)" Command="{Binding SetupWatchdogCommand}" Margin="0,0,10,8" Background="#1F6FEB" Foreground="White"/>
+              <Button Content="Запустить службу" Command="{Binding StartWatchdogServiceCommand}" Margin="0,0,10,8" Background="#1B5E20" Foreground="White"/>
+              <Button Content="Остановить службу" Command="{Binding StopWatchdogServiceCommand}" Margin="0,0,10,8" Background="#7C4D00" Foreground="White"/>
               <Button Content="Перезапустить" Command="{Binding RestartWatchdogServiceCommand}" Margin="0,0,10,8"/>
-              <Button Content="Обновить статус и лог" Command="{Binding RefreshWatchdogStatusCommand}" Margin="0,0,10,8"/>
+              <Button Content="Обновить статус и лог" Command="{Binding RefreshWatchdogStatusCommand}" Margin="0,0,10,8" Background="#243B55" Foreground="White"/>
             </WrapPanel>
             <TextBlock Text="{Binding WatchdogActionStatus}" Foreground="#FACC15" TextWrapping="Wrap"/>
           </StackPanel></Border>
@@ -217,7 +221,7 @@
               <TextBlock Grid.Row="11" Text="Только указанные базы (пусто = все)" VerticalAlignment="Center"/><TextBox Grid.Row="11" Grid.Column="1" Text="{Binding Watchdog.TargetInfoBasesText}" Watermark="Оставьте пустым для всех баз"/>
             </Grid>
             <StackPanel Orientation="Horizontal" Spacing="10">
-              <Button Content="Сохранить конфигурацию Watchdog" Command="{Binding SaveWatchdogConfigCommand}" Background="#065F46"/>
+              <Button Content="Сохранить конфигурацию Watchdog" Command="{Binding SaveWatchdogConfigCommand}" Background="#1B5E20" Foreground="White"/>
               <TextBlock Text="Режим группировки: Full (база+польз.+хост+прил.), UserAndBase (1 сеанс на базу), UserBaseApp" Classes="muted" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="520"/>
             </StackPanel>
           </StackPanel></Border>
@@ -246,7 +250,7 @@
             </Grid>
             <CheckBox IsChecked="{Binding Settings.MonitorAllClusters}" Content="Собирать сеансы со всех кластеров RAS (а не только с самого активного)"/>
             <CheckBox IsChecked="{Binding Settings.MinimizeToTrayOnClose}" Content="Сворачивать в системный трей при закрытии окна (для суточных отчётов в 23:55)"/>
-            <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сохранить и проверить" Command="{Binding SaveSettingsCommand}"/><Button Content="Запустить RAS" Command="{Binding StartRasCommand}"/><TextBlock Text="{Binding RacStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="400" TextWrapping="Wrap" ToolTip.Tip="{Binding Settings.RacPath}"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="10"><Button Content="Сохранить и проверить" Command="{Binding SaveSettingsCommand}" Background="#1F6FEB" Foreground="White"/><Button Content="Запустить RAS" Command="{Binding StartRasCommand}" Background="#243B55" Foreground="White"/><TextBlock Text="{Binding RacStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="400" TextWrapping="Wrap" ToolTip.Tip="{Binding Settings.RacPath}"/></StackPanel>
           </StackPanel></Border>
           <Border Classes="card"><StackPanel Spacing="10">
             <TextBlock Text="Автоматический суточный отчёт" FontSize="17" FontWeight="SemiBold"/>
@@ -323,7 +327,7 @@
             </Grid>
             <StackPanel Orientation="Horizontal" Spacing="10">
               <Button Content="Проверить обновления" Command="{Binding CheckUpdatesCommand}"/>
-              <Button Content="Обновить и перезапустить" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#065F46"/>
+              <Button Content="Обновить и перезапустить" Command="{Binding ApplyUpdateCommand}" IsVisible="{Binding IsUpdateAvailable}" Background="#1F6FEB" Foreground="White"/>
               <TextBlock Text="{Binding UpdateStatus}" VerticalAlignment="Center" Classes="muted" MaxWidth="420" TextWrapping="Wrap"/>
             </StackPanel>
             <StackPanel IsVisible="{Binding HasReleaseNotes}" Spacing="4">
@@ -346,11 +350,11 @@
       </TabItem>
       <TabItem Header="Журнал"><TextBox Margin="0,12,0,0" Text="{Binding LogText}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Consolas" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto"/></TabItem>
     </TabControl>
-    <Border Grid.Row="2" Background="#111A29" BorderBrush="#273449" BorderThickness="0,1,0,0">
-      <Grid ColumnDefinitions="*,Auto" Margin="16,4">
+    <Border Grid.Row="2" Classes="card" Padding="14,10">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
         <TextBlock Text="{Binding Footer}" VerticalAlignment="Center" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"/>
         <StackPanel Grid.Column="1" HorizontalAlignment="Right" Spacing="3">
-          <TextBlock Text="Разработчик: Zakharevich Igor" HorizontalAlignment="Right" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock Text="Разработчик: Zakharevich Igor" HorizontalAlignment="Right" FontSize="14" FontWeight="SemiBold"/>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
             <Button Content="csl.by" Command="{Binding OpenWebsiteCommand}" FontSize="11" Padding="9,4"/>
             <Button Content="info@csl.by" Command="{Binding OpenEmailCommand}" FontSize="11" Padding="9,4"/>
